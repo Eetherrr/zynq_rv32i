@@ -1,0 +1,37 @@
+# ============================================================
+#  .gitignore — 由 vivadoprj 自动生成
+#  可自由追加规则；vivadoprj 不会覆盖已有文件
+# ============================================================
+
+# ---- Vivado 工程（可用 make 从源码重建） ----
+/prj/
+
+# ---- 仿真产物 ----
+/sim/*.vcd
+/sim/*.wdb
+/sim/*.log
+/sim/*.jou
+/sim/.Xil/
+/sim/xsim.dir/
+
+# ---- Vivado 临时文件 / 会话记录 ----
+*.jou
+*.log
+*.str
+.Xil/
+.xsim.dir/
+vivado*.jou
+vivado*.log
+webtalk*.jou
+webtalk*.log
+usage_statistics_webtalk.*
+
+# ---- slang / LSP 个人配置 ----
+/.slang
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
