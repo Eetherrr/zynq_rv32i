@@ -20,7 +20,11 @@ module CPU_top (
 
     // 中断
     input  wire [ 7:0] int_i,
-    input  wire        hold_flag_i
+    input  wire        hold_flag_i,
+
+    // 取指总线授权（来自 RIB）：用于在数据访问占用总线的周期冻结 IF
+    input  wire        if_grant_i,
+    input  wire        bus_grant_valid_i
 );
 
     //==================================================================
@@ -97,13 +101,30 @@ module CPU_top (
     // 说明：PC 的跳转/停顿实际由 PCReg 的 jmp_flag / stall 端口完成
     //       （见下方 u_PCReg 例化），此处不再保留冗余的 pc_load 逻辑。
 
+    // ---- 取指总线停顿 ----
+    // 取指与数据访问共用 RIB，而 RIB 每拍只服务一个主机。数据访问占用
+    // 总线的周期里取指端口拿不到授权，rom_instr_i 会是上一次取指的结果，
+    // 因此必须冻结 PC 与 IF2ID，否则过期指令会进入 ID 级。
+    //
+    // 优先级约定（见 CPU_SOC_top）：数据口 = m0，取指口 = m1。
+    wire if_bus_stall = bus_grant_valid_i & ~if_grant_i;
+
+    // PC 与 IF2ID 的 stall 只由真正的流水线停顿驱动；总线停顿用下面的
+    // 「气泡注入」处理：冻结 PC（下一拍重新取指），并把本拍因为丢失授权
+    // 而变得过期的指令换成 NOP，避免 ID 重复执行同一条指令（那会导致死锁）。
+    wire if_stall = stall_pc    | hold_flag_i;
+    wire id_stall = stall_if2id;
+
+    // 总线停顿期间送入 IF2ID 的指令固定为 NOP
+    wire [`DATA_BUS] if_instr_gated = if_bus_stall ? `INST_NOP : if_instr;
+
     //==================================================================
     // 2. IF 阶段
     //==================================================================
     PCReg u_PCReg (
         .clk_sys  (clk_sys),
         .rst_sys  (rst_sys),
-        .stall    (stall_pc | hold_flag_i),
+        .stall    (if_stall),
         .jmp_flag (redirect_en),
         .jmp_addr (redirect_pc),
         .pc       (if_pc)
@@ -121,10 +142,10 @@ module CPU_top (
         .clk_sys      (clk_sys),
         .rst_sys      (rst_sys),
         .flush        (flush_if2id),
-        .stall        (stall_if2id),
+        .stall        (id_stall),
         // flush 时指令被清为 NOP，PC 仍锁存重定向目标，便于调试观察流水线
         .flush_pc     (redirect_en ? redirect_pc : if_pc),
-        .instr_i      (if_instr),
+        .instr_i      (if_instr_gated),
         .instr_addr_i (if_pc),
         .instr_o      (id_instr),
         .instr_addr_o (id_pc)

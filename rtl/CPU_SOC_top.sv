@@ -79,6 +79,10 @@ module CPU_SOC_top (
     wire [7:0]  int_bus;
     wire        hold_flag;
 
+    // 总线授权：数据口是 m0，取指口是 m1
+    wire        bus_grant_valid;
+    wire        if_grant;
+
     //------------------------------------------------------------------
     // 访问宽度推导
     //   CPU_top 目前只引出 ram_be_o（4 位字节使能），未引出 mem_size。
@@ -111,7 +115,11 @@ module CPU_SOC_top (
 
         // 中断与总线等待
         .int_i       (int_bus),
-        .hold_flag_i (hold_flag)
+        .hold_flag_i (hold_flag),
+
+        // 取指总线授权：数据访问占用总线的周期需要冻结 IF
+        .if_grant_i        (if_grant),
+        .bus_grant_valid_i (bus_grant_valid)
     );
 
     //==================================================================
@@ -149,23 +157,32 @@ module CPU_SOC_top (
         .clk_sys (clk_sys),
         .rst_sys (rst_sys),
 
-        // ---- Master 0 : 取指 ----
-        .m0_addr  (cpu_rom_addr),
-        .m0_wdata (32'b0),
-        .m0_rdata (cpu_rom_instr),
-        .m0_req   (1'b1),               // 取指端口持续请求
-        .m0_we    (`DISABLE),
-        .m0_re    (`ENABLE),
-        .m0_size  (`MSZ_W),
+        // 授权状态引出给 CPU（见 CPU_top 的 if_bus_stall）
+        .grant_o       (),
+        .valid_o       (bus_grant_valid),
+        .m1_grant_o    (if_grant),
 
-        // ---- Master 1 : 数据访存 ----
-        .m1_addr  (cpu_ram_addr),
-        .m1_wdata (cpu_ram_wdata),
-        .m1_rdata (cpu_ram_rdata),
-        .m1_req   (cpu_ram_we | cpu_ram_re),
-        .m1_we    (cpu_ram_we),
-        .m1_re    (cpu_ram_re),
-        .m1_size  (cpu_size),
+        // ---- Master 0 : 数据访存（优先级最高）----
+        // 数据写一旦丢失就无法恢复，而取指晚一拍只是让 IF 多等一拍；
+        // 因此把数据口放在最高优先级，取指口放在 m1。
+        // CPU_top 用 if_grant / grant_valid 检测取指被让出并冻结 IF。
+        .m0_addr  (cpu_ram_addr),
+        .m0_wdata (cpu_ram_wdata),
+        .m0_rdata (cpu_ram_rdata),
+        .m0_req   (cpu_ram_we | cpu_ram_re),
+        .m0_we    (cpu_ram_we),
+        .m0_re    (cpu_ram_re),
+        .m0_size  (cpu_size),
+
+        // ---- Master 1 : 取指（指令 ROM）----
+        // 取指端口持续请求；只要数据口不发请求，它每拍都能拿到授权。
+        .m1_addr  (cpu_rom_addr),
+        .m1_wdata (32'b0),
+        .m1_rdata (cpu_rom_instr),
+        .m1_req   (1'b1),
+        .m1_we    (`DISABLE),
+        .m1_re    (`ENABLE),
+        .m1_size  (`MSZ_W),
 
         // ---- Master 2 / 3 : 预留 ----
         .m2_addr  (32'b0),

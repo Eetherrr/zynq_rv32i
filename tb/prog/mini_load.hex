@@ -1,0 +1,10 @@
+// mini_load.hex — 最小 store/load 回读测试（仅用于定位 load 问题）
+// 期望：x7 = 0xAA，RAM[0x1000_0000] = 0xAA，RAM[0x1000_0004] = 0xAA
+
+100002b7    // 0x000  lui  x5, 0x10000     x5=0x10000000
+0aa00313    // 0x004  addi x6, x0, 0xAA    x6=0xAA
+0062a023    // 0x008  sw   x6, 0(x5)       RAM[base]=0xAA
+0002a393    // 0x00c  lw   x7, 0(x5)       x7 应=0xAA
+00038413    // 0x010  addi x8, x7, 0
+0072c023    // 0x014  sw   x7, 4(x5)       RAM[base+4]=x7
+0000006f    // 0x018  jal  x0, 0           挂死

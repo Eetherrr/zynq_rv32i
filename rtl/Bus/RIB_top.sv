@@ -23,6 +23,11 @@ module RIB (
         input  wire        clk_sys,
         input  wire        rst_sys,
 
+        // ---- 仲裁状态（引出给 CPU 用于取指停顿 / 调试）----
+        output logic [ 3:0] grant_o,        // 独热授权
+        output logic        valid_o,        // 本拍有主机获得授权
+        output logic        m1_grant_o,     // 取指口（m1）是否获得授权
+
         // ---------------- Master 0 ----------------
         input  wire [31:0] m0_addr,
         input  wire [31:0] m0_wdata,
@@ -135,6 +140,11 @@ module RIB (
         .valid_o   (grant_valid),
         .grant_id_o(grant_id)
     );
+
+    // 引出仲裁状态
+    assign grant_o    = grant;
+    assign valid_o    = grant_valid;
+    assign m1_grant_o = grant[1];
 
     //==================================================================
     // 2. 主机侧 MUX：把授权主机的地址 / 数据 / 控制送到共享从机通路

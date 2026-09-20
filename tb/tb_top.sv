@@ -313,7 +313,7 @@ module tb_top;
         $display("");
         $display("-- 3) memory side effects --");
         check(16, u_dut.u_RAM.mem[0], 32'h1);                 // SW x6,0(x5)
-        check(17, u_dut.u_RAM.mem[8'h300>>2], 32'h0000_BEEF); // SH x28,0(x29)
+        check(17, u_dut.u_RAM.mem[192], 32'h0000_BEEF);       // SH x28,0(x29)
 
         $display("");
         $display("-- 4) GPIO side effects --");
