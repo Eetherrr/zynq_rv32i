@@ -3,6 +3,8 @@
 #    make pins         从顶层模块生成 / 更新 constrs/pins.csv
 #    make refresh      刷新源文件列表（含从 pins.csv 生成 pins.xdc）
 #    make project      仅在 .xpr 不存在时创建 Vivado 工程
+#    make check        非工程模式的 RTL 语法 / 详细阐述检查
+#    make tb           非工程模式运行 tb/ 下的测试平台（xsim）
 #    make synth        综合
 #    make impl         实现
 #    make bitstream    综合 + 实现 + Bitstream
@@ -20,6 +22,7 @@ PRJ_NAME   := zynq_rv32i
 DEVICE     ?= xc7z010clg400-1
 TOP        ?= CPU_SOC_top
 TB_TOP     ?= tb_top
+TB         ?= tb_rib_periph
 WAVE       ?= 0
 JOBS       ?= 8
 SIM_RUN    ?= all
@@ -45,8 +48,9 @@ export VIVADOPRJ_TB     := $(TB_TOP)
 export VIVADOPRJ_WAVE   := $(WAVE)
 export VIVADOPRJ_JOBS   := $(JOBS)
 export VIVADOPRJ_SIMRUN := $(SIM_RUN)
+export TB               := $(TB)
 
-.PHONY: all project refresh synth impl bitstream sim gui pins slang clean distclean help
+.PHONY: all project refresh synth impl bitstream sim gui pins slang check tb clean distclean help
 
 all: bitstream
 
@@ -110,10 +114,24 @@ slang:
 	@$(VIVADO) -mode batch -source $(SCRIPT_DIR)/gen_slang_config.tcl \
 	          -nolog -nojournal
 
+# ---- RTL 语法 / 详细阐述检查（不依赖 Vivado 工程） ----
+check:
+	@echo "==> RTL 检查（顶层 $(TOP)）"
+	$(VIVADO) -mode batch -source $(SCRIPT_DIR)/check_rtl.tcl \
+	          -nolog -nojournal
+
+# ---- 非工程模式运行测试平台（xsim） ----
+tb:
+	@echo "==> 运行测试平台：$(TB)"
+	$(VIVADO) -mode batch -source $(SCRIPT_DIR)/run_tb.tcl \
+	          -nolog -nojournal
+
 # ---- 清理 ----
 clean:
 	@rm -rf $(SIM_DIR)/*.vcd $(SIM_DIR)/*.wdb $(SIM_DIR)/*.log
 	@rm -rf $(ROOT)/*.jou $(ROOT)/*.log $(ROOT)/.Xil
+	@rm -rf $(ROOT)/xsim.dir $(ROOT)/*.wdb $(ROOT)/*.pb
+	@rm -rf $(SIM_DIR)/xsim_run
 	@echo "==> 已清理仿真产物"
 
 distclean: clean
@@ -126,6 +144,8 @@ help:
 	@echo "  pins       从顶层模块生成 / 更新 constrs/pins.csv"
 	@echo "  refresh    刷新源文件列表并从 pins.csv 生成 pins.xdc"
 	@echo "  project    仅在 .xpr 不存在时创建工程"
+	@echo "  check      非工程模式的 RTL 语法 / 详细阐述检查"
+	@echo "  tb         非工程模式运行测试平台 (TB=tb_rib_periph)"
 	@echo "  synth      综合"
 	@echo "  impl       实现"
 	@echo "  bitstream  综合 + 实现 + 生成 bitstream"
@@ -136,4 +156,4 @@ help:
 	@echo "  distclean  清理所有产物（含 Vivado 工程）"
 	@echo ""
 	@echo "引脚约束工作流："
-	@echo "  make pin-csv   生成模板 → 编辑 constrs/pins.csv 填引脚 → make synth"
+	@echo "  make pins  生成模板 → 编辑 constrs/pins.csv 填引脚 → make synth"

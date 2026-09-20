@@ -1,3 +1,5 @@
+`timescale 1ns / 1ps
+
 `include "../../sys_define.svh"
 
 module Decoder (
@@ -219,9 +221,7 @@ module Decoder (
                 op1_sel = `OP1_RS1;
                 op2_sel = `OP2_RS2;
                 wb_sel  = `WB_ALU;
-                case ({
-                              funct7, funct3
-                          })
+                case ({funct7, funct3})
                     {`FCT7_L, `INST_ADD_SUB} :
                         alu_op = `ALU_ADD;
                     {`FCT7_A, `INST_ADD_SUB} :

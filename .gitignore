@@ -14,6 +14,15 @@
 /sim/.Xil/
 /sim/xsim.dir/
 
+# ---- xsim 独立流程（scripts/run_tb.tcl）产生的中间文件 ----
+/xsim.dir/
+/xsim.log
+/*.wdb
+/*.pb
+/xvlog.log
+/xelab.log
+/sim/xsim_run/
+
 # ---- Vivado 临时文件 / 会话记录 ----
 *.jou
 *.log

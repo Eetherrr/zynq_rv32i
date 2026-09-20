@@ -9,6 +9,11 @@
 `define ADDR_BUS 4:0
 `define INST_BUS 31:0
 
+// 字节使能（4 字节通道）
+`define BE_B 4'b0001   // 字节
+`define BE_H 4'b0011   // 半字
+`define BE_W 4'b1111   // 字
+
 `define ENABLE 1'b1
 `define DISABLE 1'b0
 `define RESET_EN 1'b0
@@ -27,6 +32,40 @@
 
 // PC 复位向量
 `define PC_RESET 32'h0000_0000
+
+// --------------------
+// RIB 地址映射
+//   从机选中条件： (addr & MASK) == BASE
+//   MASK 为覆盖该从机地址空间所需的全 1 掩码
+//
+//   *_ALIAS_MASK 用于把总线地址裁成「从机内部偏移」：
+//       offset = addr & ALIAS_MASK
+//   这样即使从机基址落在 0x1000_0000 这样的高地址，其内部仍只用
+//   小范围索引（如 RAM 用 offset[15:2] 取 16K 个字），无需 64MB 存储。
+// --------------------
+`define ROM_BASE   32'h0000_0000   // 指令 ROM  16 KiB
+`define ROM_MASK   32'hFFFF_C000
+`define ROM_ALIAS_MASK 32'h0000_3FFF
+
+`define RAM_BASE   32'h1000_0000   // 数据 RAM  64 KiB
+`define RAM_MASK   32'hFFFF_0000
+`define RAM_ALIAS_MASK 32'h0000_FFFF
+
+`define TIMER_BASE 32'h2000_0000   // 定时器    1 KiB
+`define TIMER_MASK 32'hFFFF_FC00
+`define TIMER_ALIAS_MASK 32'h0000_03FF
+
+`define SPI_BASE   32'h2000_0400   // SPI       1 KiB
+`define SPI_MASK   32'hFFFF_FC00
+`define SPI_ALIAS_MASK 32'h0000_03FF
+
+`define UART_BASE  32'h2000_0800   // UART      1 KiB
+`define UART_MASK  32'hFFFF_FC00
+`define UART_ALIAS_MASK 32'h0000_03FF
+
+`define GPIO_BASE  32'h2000_0C00   // GPIO      1 KiB
+`define GPIO_MASK  32'hFFFF_FC00
+`define GPIO_ALIAS_MASK 32'h0000_03FF
 
 // 流水线气泡
 `define INST_NOP 32'h0000_0013

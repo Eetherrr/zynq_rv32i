@@ -1,3 +1,5 @@
+`timescale 1ns / 1ps
+
 `include "../sys_define.svh"
 
 module CPU_top (
@@ -92,12 +94,8 @@ module CPU_top (
     wire [`DATA_BUS] redirect_pc;
 
     // ---- PC 重定向 ----
-    wire [`DATA_BUS] pc_next;
-    wire             pc_load;
-    wire [`DATA_BUS] pc_load_value;
-
-    assign pc_load       = redirect_en | hold_flag_i;
-    assign pc_load_value = redirect_en ? redirect_pc : if_pc;
+    // 说明：PC 的跳转/停顿实际由 PCReg 的 jmp_flag / stall 端口完成
+    //       （见下方 u_PCReg 例化），此处不再保留冗余的 pc_load 逻辑。
 
     //==================================================================
     // 2. IF 阶段
@@ -124,6 +122,8 @@ module CPU_top (
         .rst_sys      (rst_sys),
         .flush        (flush_if2id),
         .stall        (stall_if2id),
+        // flush 时指令被清为 NOP，PC 仍锁存重定向目标，便于调试观察流水线
+        .flush_pc     (redirect_en ? redirect_pc : if_pc),
         .instr_i      (if_instr),
         .instr_addr_i (if_pc),
         .instr_o      (id_instr),
