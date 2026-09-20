@@ -140,7 +140,11 @@ module UART #(
                 TX_IDLE: begin
                     tx_line <= 1'b1;
                     if (tx_start) begin
-                        tx_shift <= tx_data;
+                        // 同拍又写 TXDATA 时用新写入的数据；否则用寄存器值。
+                        // （tx_data 是非阻塞赋值，下一拍才会更新，这里必须
+                        //   在本拍就把要发送的字节装进移位寄存器。）
+                        tx_shift <= (we_hit && (reg_sel == REG_TXDATA)) ? wdata[7:0]
+                                                                        : tx_data;
                         tx_state <= TX_START;
                         tx_line  <= 1'b0;       // 起始位
                         tx_busy  <= `ENABLE;
@@ -151,7 +155,7 @@ module UART #(
                     if (baud_tick) begin
                         tx_state <= TX_DATA;
                         tx_idx   <= 3'd0;
-                        tx_line  <= tx_data[0]; // 数据位 0（LSB first）
+                        tx_line  <= tx_shift[0]; // 数据位 0（LSB first）
                     end
                 end
 
