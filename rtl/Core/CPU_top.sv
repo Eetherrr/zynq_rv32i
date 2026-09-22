@@ -109,24 +109,40 @@ module CPU_top (
     // 优先级约定（见 CPU_SOC_top）：数据口 = m0，取指口 = m1。
     wire if_bus_stall = bus_grant_valid_i & ~if_grant_i;
 
-    // 取指地址对齐（ROM 为 IP 寄存输出，读延迟 1 拍）
-    //   IP 语义：T 拍给 addra，T+1 拍沿 douta 才是该地址的指令。
-    //   IF2ID 在 T+1 拍沿锁存该指令，但此时 if_pc 已经是 A(T+1) 了，
-    //   所以指令地址必须用延后一拍的 PC，二者才对应同一条指令。
+    // ---- 重定向后的一拍气泡 ----
+    // 分支/跳转在 EX 级解析后，PC 当拍就跳到目标地址，但 ROM 是寄存输出：
+    // 目标地址的指令要再过一拍才出现在 rom_instr_i 上。若不补这一拍，
+    // 重定向后的第一个沿会把「旧地址的指令」锁进 IF2ID 并执行 ——
+    // 现象就是分支/跳转后多跑一条错误指令。
+    // 这里用 redirect_d1 在重定向的下一拍冻结 PC 并注入 NOP。
+    logic redirect_d1;
+    always_ff @(posedge clk_sys or negedge rst_sys) begin
+        if (rst_sys == `RESET_EN) redirect_d1 <= 1'b0;
+        else                      redirect_d1 <= redirect_en;
+    end
+    wire flush_bubble = redirect_d1;
+
+    // 取指地址必须与 ROM 的 1 拍延迟对齐：
+    //   ROM 语义是「T 拍给 addr，T+1 拍沿 douta 才是该地址的指令」。
+    //   IF2ID 在 T+1 拍沿锁存该指令，而 instr_o 与 instr_addr_o 用的是
+    //   同一组输入，所以 instr_addr_i 必须是「T 拍的 PC」= 延后一拍的 PC。
+    //   若直接用 if_pc，锁存出的地址会比它携带的指令新的 4 字节，
+    //   导致 EX 级 pc+imm 算出的所有分支/跳转目标偏移 4 字节。
     logic [`DATA_BUS] if_pc_d1;
     always_ff @(posedge clk_sys or negedge rst_sys) begin
         if (rst_sys == `RESET_EN) if_pc_d1 <= `PC_RESET;
         else                      if_pc_d1 <= if_pc;
     end
 
+    //
     // PC 与 IF2ID 的 stall 只由真正的流水线停顿驱动；总线停顿用下面的
     // 「气泡注入」处理：冻结 PC（下一拍重新取指），并把本拍因为丢失授权
     // 而变得过期的指令换成 NOP，避免 ID 重复执行同一条指令（那会导致死锁）。
-    wire if_stall = stall_pc    | hold_flag_i;
+    wire if_stall = stall_pc    | hold_flag_i | flush_bubble;
     wire id_stall = stall_if2id;
 
-    // 总线停顿期间送入 IF2ID 的指令固定为 NOP
-    wire [`DATA_BUS] if_instr_gated = if_bus_stall ? `INST_NOP : if_instr;
+    // 总线停顿 / 重定向气泡期间，送入 IF2ID 的指令固定为 NOP
+    wire [`DATA_BUS] if_instr_gated = (if_bus_stall | flush_bubble) ? `INST_NOP : if_instr;
 
     //==================================================================
     // 2. IF 阶段

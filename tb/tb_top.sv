@@ -87,9 +87,31 @@ module tb_top;
     wire [31:0] mem_addr  = u_dut.cpu_ram_addr;
     wire [31:0] mem_wdata = u_dut.cpu_ram_wdata;
     wire [31:0] cur_pc    = u_dut.u_CPU_top.if_pc;
+    wire        rst_sys   = u_dut.rst_sys;
 
     bit          result_seen = 1'b0;
     logic [31:0] result_w    = 32'hDEAD_DEAD;
+
+    //------------------------------------------------------------------
+    // 取指对齐诊断：复位后头 20 拍，逐拍列出
+    //   if_pc（PC 寄存器输出）/ rom_instr（ROM 锁定输出）
+    //   / id_pc、id_instr（IF2ID 锁存结果）
+    //   判断「指令是否与它应属的地址配对」。
+    //   TRACE_MAX 设 0 可关闭。
+    //------------------------------------------------------------------
+    int TRACE_MAX = 20;
+    int fa_cnt = 0;
+
+    always @(posedge clk_sys) begin
+        if (rst_async && fa_cnt < TRACE_MAX) begin
+            fa_cnt = fa_cnt + 1;
+            $display("[FA] if_pc=%h rom_instr=%h | id_pc=%h id_instr=%h",
+                     u_dut.u_CPU_top.if_pc,
+                     u_dut.u_CPU_top.if_instr,
+                     u_dut.u_CPU_top.id_pc,
+                     u_dut.u_CPU_top.id_instr);
+        end
+    end
 
     // 程序流追踪：CPU 是否跑飞到了失败汇合点
     bit          reached_fail_path = 1'b0;
@@ -188,14 +210,17 @@ module tb_top;
             // 字节使能由 size + 地址低位展开（与 rtl/Peripheral/RAM.sv 一致）
             logic [3:0] be;
             case (u_dut.s_ram_size)
-                `MSZ_B:  be = 4'b0001 << u_dut.s_ram_addr[1:0];
-                `MSZ_H:  be = u_dut.s_ram_addr[1] ? 4'b1100 : 4'b0011;
-                default: be = 4'b1111;
+                `MSZ_B:
+                    be = 4'b0001 << u_dut.s_ram_addr[1:0];
+                `MSZ_H:
+                    be = u_dut.s_ram_addr[1] ? 4'b1100 : 4'b0011;
+                default:
+                    be = 4'b1111;
             endcase
             for (int b = 0; b < 4; b = b + 1) begin
                 if (be[b])
                     ram_shadow[u_dut.s_ram_addr[15:2]][8*b +: 8]
-                        <= u_dut.s_ram_wdata[8*b +: 8];
+                              <= u_dut.s_ram_wdata[8*b +: 8];
             end
             ram_wr_cnt <= ram_wr_cnt + 1;
         end

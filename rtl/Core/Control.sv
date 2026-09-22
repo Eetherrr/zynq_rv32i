@@ -69,8 +69,11 @@ module Control (
     assign redirect  = ex_branch_taken | ex_jump_taken;
     assign exception = ex_illegal | ex_ecall | ex_ebreak;
 
+    // 注意：必须同时要求 id_ex_rd_we —— 若该 load 不写回（rd_we=0），
+    // 它不会产生 RAW 依赖，不应触发停顿。
     assign load_use_hazard =
            id_ex_mem_read
+        && id_ex_rd_we
         && (id_ex_rd_addr != `REG_ZERO)
         && (   (id_uses_rs1 && (id_ex_rd_addr == id_rs1_addr))
             || (id_uses_rs2 && (id_ex_rd_addr == id_rs2_addr)));

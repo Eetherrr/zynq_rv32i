@@ -7,6 +7,7 @@
 /prj/
 
 # ---- 仿真产物 ----
+/sim
 /sim/*.vcd
 /sim/*.wdb
 /sim/*.log
