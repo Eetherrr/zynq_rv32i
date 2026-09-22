@@ -81,7 +81,7 @@ module CPU_top (
     wire             mem_read_from_ex, mem_write_from_ex, mem_unsigned_from_ex;
 
     // ---- MEM ----
-    wire [`DATA_BUS] mem_addr, mem_wdata, mem_rdata_ext;
+    wire [`DATA_BUS] mem_addr, mem_wdata;
     wire [3:0]       mem_be;
     wire             mem_req, mem_we, mem_align_err;
 
@@ -108,6 +108,16 @@ module CPU_top (
     //
     // 优先级约定（见 CPU_SOC_top）：数据口 = m0，取指口 = m1。
     wire if_bus_stall = bus_grant_valid_i & ~if_grant_i;
+
+    // 取指地址对齐（ROM 为 IP 寄存输出，读延迟 1 拍）
+    //   IP 语义：T 拍给 addra，T+1 拍沿 douta 才是该地址的指令。
+    //   IF2ID 在 T+1 拍沿锁存该指令，但此时 if_pc 已经是 A(T+1) 了，
+    //   所以指令地址必须用延后一拍的 PC，二者才对应同一条指令。
+    logic [`DATA_BUS] if_pc_d1;
+    always_ff @(posedge clk_sys or negedge rst_sys) begin
+        if (rst_sys == `RESET_EN) if_pc_d1 <= `PC_RESET;
+        else                      if_pc_d1 <= if_pc;
+    end
 
     // PC 与 IF2ID 的 stall 只由真正的流水线停顿驱动；总线停顿用下面的
     // 「气泡注入」处理：冻结 PC（下一拍重新取指），并把本拍因为丢失授权
@@ -146,7 +156,7 @@ module CPU_top (
         // flush 时指令被清为 NOP，PC 仍锁存重定向目标，便于调试观察流水线
         .flush_pc     (redirect_en ? redirect_pc : if_pc),
         .instr_i      (if_instr_gated),
-        .instr_addr_i (if_pc),
+        .instr_addr_i (if_pc_d1),
         .instr_o      (id_instr),
         .instr_addr_o (id_pc)
     );
@@ -352,7 +362,17 @@ module CPU_top (
 
     //==================================================================
     // 5. MEM 阶段
+    //
+    // 访存读数据对齐（ROM/RAM 均为 IP 寄存输出，读延迟 1 拍）
+    //   IP 语义：T 拍给 addr，T+1 拍沿 rdata 才是该 addr 的数据。
+    //   MEM 级在 T 拍给出 mem_addr 与写回控制；ram_data_i 在 T+1 拍沿
+    //   变为该地址的数据。此时 MEM 的组合提取/扩展逻辑得到的就是正确
+    //   数据，而 MEM2WB 恰好也在 T+1 拍沿锁存 —— 控制与数据同拍对齐，
+    //   因此这里直接送组合结果，不需要再额外打一拍（多打一拍会让
+    //   load 数据晚一拍，与写回控制错位）。
     //==================================================================
+    logic [`DATA_BUS] mem_rdata_ext_c;   // 数据提取 + 符号扩展结果
+
     MEM u_MEM (
         .mem_alu_result (mem_alu_result),
         .mem_rs2_data   (mem_rs2_data),
@@ -361,7 +381,7 @@ module CPU_top (
         .mem_write      (mem_write_from_ex),
         .mem_unsigned   (mem_unsigned_from_ex),
 
-        .mem_rdata      (ram_data_i),
+        .mem_rdata      (ram_data_i),      // IP 寄存输出（上一拍 addr 的数据）
 
         .mem_addr       (mem_addr),
         .mem_wdata      (mem_wdata),
@@ -369,7 +389,7 @@ module CPU_top (
         .mem_req        (mem_req),
         .mem_we         (mem_we),
 
-        .mem_rdata_ext  (mem_rdata_ext),
+        .mem_rdata_ext  (mem_rdata_ext_c),
         .mem_align_err  (mem_align_err)
     );
 
@@ -386,7 +406,7 @@ module CPU_top (
         .stall          (1'b0),
 
         .mem_alu_result (mem_alu_result),
-        .mem_rdata      (mem_rdata_ext),   // 注意: 传扩展后的数据
+        .mem_rdata      (mem_rdata_ext_c),  // 提取+扩展结果，与写回控制同拍
         .mem_pc4        (mem_pc4),
         .mem_rd_addr    (mem_rd_addr),
         .mem_rd_we      (mem_rd_we),

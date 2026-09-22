@@ -265,9 +265,8 @@ module CPU_SOC_top (
     //==================================================================
     // 5. 从机例化
     //==================================================================
-    ROM #(
-        .WORDS (4096)                   // 16 KiB
-    ) u_ROM (
+    // 指令 ROM：封装 IP（4096x32，16 KiB，读延迟 1 拍）
+    ROM_Ctrl u_ROM (
         .clk_sys (clk_sys),
         .rst_sys (rst_sys),
         .sel     (rom_sel),
@@ -279,9 +278,8 @@ module CPU_SOC_top (
         .rdata   (rom_rdata)
     );
 
-    RAM #(
-        .WORDS (16384)                  // 64 KiB
-    ) u_RAM (
+    // 数据 RAM：封装 IP（16384x32，64 KiB，读延迟 1 拍）
+    RAM_Ctrl u_RAM (
         .clk_sys (clk_sys),
         .rst_sys (rst_sys),
         .sel     (ram_sel),

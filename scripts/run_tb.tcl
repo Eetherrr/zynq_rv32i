@@ -46,12 +46,30 @@ if {[llength $tb_files] == 0} {
     exit 1
 }
 
-puts "==> RTL [llength $rtl_files] 个文件，TB [llength $tb_files] 个文件"
+# ---- 收集 IP 仿真模型（ROM / RAM 为 Block Memory Generator）----
+set ip_files [list]
+foreach ip {ROM RAM} {
+    foreach cand [list \
+            "$root_dir/prj/zynq_rv32i.gen/sources_1/ip/$ip/sim/$ip.v" \
+            "$root_dir/prj/zynq_rv32i.srcs/sources_1/ip/$ip/sim/$ip.v"] {
+        if {[file exists $cand]} { lappend ip_files $cand ; break }
+    }
+}
+
+puts "==> RTL [llength $rtl_files] 个，TB [llength $tb_files] 个，IP [llength $ip_files] 个"
 
 # ---- 在 sim/xsim_run 下编译运行，产物集中在 sim/（已被 gitignore） ----
 set run_dir $root_dir/sim/xsim_run
 file mkdir $run_dir
 cd $run_dir
+
+# ---- IP 初始化文件必须放在运行目录（BLK_MEM_GEN 会按 C_INIT_FILE 查找）----
+foreach f [glob -nocomplain "$root_dir/prj/zynq_rv32i.gen/sources_1/ip/*/*.mif"] {
+    file copy -force $f $run_dir
+}
+foreach f [glob -nocomplain "$root_dir/prj/zynq_rv32i.ip_user_files/mem_init_files/*.coe"] {
+    file copy -force $f $run_dir
+}
 
 # ---- include 路径：rtl 与 tb 的所有子目录 ----
 set inc_args [list]
@@ -60,7 +78,7 @@ foreach d [concat [collect_dirs $root_dir/rtl] [collect_dirs $root_dir/tb]] {
 }
 
 # ---- 1) 编译 ----
-set rc [catch {exec xvlog --sv {*}$inc_args {*}$rtl_files {*}$tb_files >@stdout 2>@stderr} err]
+set rc [catch {exec xvlog --sv {*}$inc_args {*}$rtl_files {*}$ip_files {*}$tb_files >@stdout 2>@stderr} err]
 if {$rc} {
     puts "=========================================="
     puts "xvlog 编译失败："
@@ -70,7 +88,17 @@ if {$rc} {
 }
 
 # ---- 2) 详细阐述 ----
-set rc [catch {exec xelab -debug typical $tb_top -s tb_sim --nolog \
+# ROM/RAM 的 IP 仿真模型依赖 BLK_MEM_GEN 原语，需要链接 unisims_ver
+set lib_args [list]
+if {[info exists ::env(XILINX_VIVADO)] && $::env(XILINX_VIVADO) ne ""} {
+    lappend lib_args -L unisims_ver
+    lappend lib_args -i "$::env(XILINX_VIVADO)/data/xsim/verilog"
+    puts "==> 链接 unisims_ver：$::env(XILINX_VIVADO)/data/xsim/verilog"
+} else {
+    puts "==> 警告：未设置 XILINX_VIVADO，含 IP 的仿真可能因缺少 unisims_ver 而失败"
+}
+
+set rc [catch {exec xelab -debug typical $tb_top -s tb_sim --nolog {*}$lib_args \
                     >@stdout 2>@stderr} err]
 if {$rc} {
     puts "=========================================="

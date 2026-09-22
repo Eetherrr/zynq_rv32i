@@ -118,13 +118,15 @@ module tb_rib_periph;
             .s_gpio_rdata(gpio_rdata),  .s_gpio_sel   (gpio_sel)
         );
 
-    ROM #(.WORDS(4096)) u_rom (
+    // ROM 同样改为 IP 封装（模块名 ROM_Ctrl）
+    ROM_Ctrl u_rom (
             .clk_sys(clk_sys), .rst_sys(rst_sys), .sel(rom_sel), .addr(s_rom_addr),
             .wdata(s_rom_wdata), .size(s_rom_size), .we(s_rom_we), .re(s_rom_re),
             .rdata(rom_rdata)
         );
 
-    RAM #(.WORDS(16384)) u_ram (
+    // RAM 已改为 IP 封装（模块名 RAM_Ctrl；RAM 保留给 IP 本身）
+    RAM_Ctrl u_ram (
             .clk_sys(clk_sys), .rst_sys(rst_sys), .sel(ram_sel), .addr(s_ram_addr),
             .wdata(s_ram_wdata), .size(s_ram_size), .we(s_ram_we), .re(s_ram_re),
             .rdata(ram_rdata)
@@ -205,7 +207,10 @@ module tb_rib_periph;
         m1_re   = 1'b1;
         m1_size = `MSZ_W;
         m1_req  = 1'b1;
-        @(negedge clk_sys);         // 半周期后组合读通路已稳定
+        // IP 为寄存输出（Total Port A Read Latency = 1）：
+        // 地址在 T 拍给出，数据在 T+1 拍沿才有效，故等到下一个 negedge 再采。
+        @(posedge clk_sys);
+        @(negedge clk_sys);
         d = m1_rdata;
         m1_req = 1'b0;
         m1_re  = 1'b0;

@@ -29,8 +29,10 @@
 //
 //   运行： make tb TB=tb_top
 //
-//   说明：程序通过层次引用写进 u_dut.u_ROM.mem，这样不动 RTL 就能换镜像。
-//         长期方案是给 ROM 传 INIT_EN / INIT_FILE 参数（见 README 待办）。
+//   说明：程序镜像由 ROM IP 的初始化文件 tb/prog/cpu_test.coe 预置
+//         （IP 内部数组不可直接写入）。
+//         读回校验用测试平台内的「影子内存」镜像 CPU 的 RAM 写操作，
+//         不依赖 IP 内部层次结构。
 //=====================================================================
 module tb_top;
 
@@ -167,6 +169,42 @@ module tb_top;
     int    errors = 0;
     string names [0:31];
 
+    //------------------------------------------------------------------
+    // RAM 影子内存（shadow memory）
+    //   RAM 已换成 Block Memory Generator IP，其内部数组的层次路径依赖
+    //   IP 实现细节（不同版本/配置会变），不适合在测试平台里硬编码。
+    //   这里改为「镜像」RAM 的实际写入：观察 RIB 送给 RAM 从机的
+    //   s_ram_we / s_ram_addr / s_ram_wdata / s_ram_size，在测试平台内
+    //   维护一份 RAM 内容副本用于最终校验。
+    //   用 s_ram_we（RIB → RAM 的实际写使能）而不是 CPU 侧 mem_we，
+    //   可以准确反映「这一拍 RAM 是否真的被写入」。
+    //------------------------------------------------------------------
+    localparam int RAM_WORDS = 16384;
+    logic [31:0] ram_shadow [0:RAM_WORDS-1];
+    int          ram_wr_cnt = 0;
+
+    always @(posedge clk_sys) begin
+        if (u_dut.s_ram_we) begin
+            // 字节使能由 size + 地址低位展开（与 rtl/Peripheral/RAM.sv 一致）
+            logic [3:0] be;
+            case (u_dut.s_ram_size)
+                `MSZ_B:  be = 4'b0001 << u_dut.s_ram_addr[1:0];
+                `MSZ_H:  be = u_dut.s_ram_addr[1] ? 4'b1100 : 4'b0011;
+                default: be = 4'b1111;
+            endcase
+            for (int b = 0; b < 4; b = b + 1) begin
+                if (be[b])
+                    ram_shadow[u_dut.s_ram_addr[15:2]][8*b +: 8]
+                        <= u_dut.s_ram_wdata[8*b +: 8];
+            end
+            ram_wr_cnt <= ram_wr_cnt + 1;
+        end
+    end
+
+    function automatic logic [31:0] peek_ram(input int word_idx);
+        peek_ram = ram_shadow[word_idx];
+    endfunction
+
     task automatic check(input int id, input logic [31:0] got,
                              input logic [31:0] exp);
         if (got === exp)
@@ -182,8 +220,8 @@ module tb_top;
         $display("---- 现场 ----");
         $display("  PC                = 0x%08x", cur_pc);
         $display("  RESULT            = 0x%08x", result_w);
-        $display("  RAM[0x1000_0000]  = 0x%08x", u_dut.u_RAM.mem[0]);
-        $display("  RAM[0x1000_0004]  = 0x%08x", u_dut.u_RAM.mem[1]);
+        $display("  RAM[0x1000_0000]  = 0x%08x", peek_ram(0));
+        $display("  RAM[0x1000_0004]  = 0x%08x", peek_ram(1));
         $display("  GPIO DIR / DATA   = 0x%02x / 0x%02x", gpio_t, gpio_o);
         $display("  TIMER count/ovf   = %0d / %0b",
                  u_dut.u_TIMER.count_reg, u_dut.u_TIMER.overflow_reg);
@@ -255,8 +293,8 @@ module tb_top;
         prog_loaded = 1'b1;
         $display("==> program loaded: %s", PROG_FILE);
 
-        for (i = 0; i < PROG_WORDS; i = i + 1)
-            u_dut.u_ROM.mem[i] = prog[i];                   // 写进 ROM 模型
+        // 程序已在 ROM IP 内由 tb/prog/cpu_test.coe 初始化，
+        // 这里不再向 ROM 写数据（IP 内部数组不可直接访问）。
 
         // ---- 2. 复位 ----
         rst_async = 1'b0;
@@ -282,7 +320,7 @@ module tb_top;
         // ---- 4. 核对 ----
         $display("");
         $display("-- 1) result word --");
-        check(0, u_dut.u_RAM.mem[0], 32'h1);
+        check(0, peek_ram(0), 32'h1);
 
         $display("");
         $display("-- 2) register file x1..x15 --");
@@ -312,8 +350,9 @@ module tb_top;
 
         $display("");
         $display("-- 3) memory side effects --");
-        check(16, u_dut.u_RAM.mem[0], 32'h1);                 // SW x6,0(x5)
-        check(17, u_dut.u_RAM.mem[192], 32'h0000_BEEF);       // SH x28,0(x29)
+        $display("       (影子内存共记录 %0d 次 RAM 写)", ram_wr_cnt);
+        check(16, peek_ram(0), 32'h1);                 // SW x6,0(x5)
+        check(17, peek_ram(192), 32'h0000_BEEF);       // SH x28,0(x29)
 
         $display("");
         $display("-- 4) GPIO side effects --");
