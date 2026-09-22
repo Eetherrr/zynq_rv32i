@@ -70,12 +70,16 @@ module UART #(
     logic [7:0]  tx_data, rx_data;
     logic        tx_line, tx_busy, rx_ready;
     logic [31:0] baud_reg, baud_cnt;
+    logic        baud_busy_d1;      // 波特率「忙」的上一拍（见 baud_tick / 计数器）
 
     logic        tx_start;      // 写 TXDATA 产生的启动脉冲
     logic        baud_preset;   // 接收起始沿：把计数器预置半个位周期
 
     wire we_hit    = we & sel;
-    wire baud_tick = (baud_cnt == 32'd0);
+    // baud_tick 只在计数器「已经在跑」时有效：空闲时计数器停在 0，
+    // 若不加 baud_busy_d1 这一项，刚进入发送状态的那一拍就会误判为
+    // 一个 tick，导致起始位只持续 1 拍、整帧短一个位周期。
+    wire baud_tick = (baud_cnt == 32'd0) && baud_busy_d1;
     wire baud_busy = tx_busy | (rx_state != RX_IDLE);
 
     //==================================================================
@@ -84,8 +88,9 @@ module UART #(
     //==================================================================
     always_ff @(posedge clk_sys or negedge rst_sys) begin
         if (rst_sys == `RESET_EN) begin
-            baud_reg    <= BAUD_DEFAULT[31:0];
-            baud_cnt    <= 32'd0;
+            baud_reg     <= BAUD_DEFAULT[31:0];
+            baud_cnt     <= 32'd0;
+            baud_busy_d1 <= `FALSE;
             tx_data     <= 8'b0;
             rx_data     <= 8'b0;
             tx_start    <= `FALSE;
@@ -123,14 +128,21 @@ module UART #(
 
             //==========================================================
             // 2) 波特率计数器
-            //    空闲时直接停在 0，避免 tick 连续有效
+            //    空闲时直接停在 0，避免 tick 连续有效。
+            //    ★ 刚进入「忙」的那一拍必须先装一个完整位周期：否则计数器
+            //      停在 0 会让 baud_tick 立刻有效，起始位只持续 1 拍，
+            //      整帧短一个位周期，接收方按位中点采样就会整体错一位。
             //==========================================================
             if (baud_preset)
                 baud_cnt <= {1'b0, baud_reg[31:1]};     // 半个位周期
+            else if (baud_busy && !baud_busy_d1)
+                baud_cnt <= baud_reg;                   // 刚进入忙：装整位周期
             else if (baud_busy)
                 baud_cnt <= baud_tick ? baud_reg : (baud_cnt - 32'd1);
             else
                 baud_cnt <= 32'd0;
+
+            baud_busy_d1 <= baud_busy;
 
             //==========================================================
             // 3) 发送状态机
@@ -230,21 +242,31 @@ module UART #(
 
     //==================================================================
     // 读回
+    //   寄存一拍输出，与 ROM/RAM（BMG 寄存输出）统一为
+    //   「T 拍给地址、T+1 拍数据有效」：CPU 在 EX 级发起地址，
+    //   MEM 级取回数据，RIB 读回按「上一拍片选」对齐。
     //==================================================================
+    logic [31:0] rdata_comb;
+
     always_comb begin
         if (rst_sys == `RESET_EN)
-            rdata = 32'b0;
+            rdata_comb = 32'b0;
         else if (!sel || !re)
-            rdata = 32'b0;
+            rdata_comb = 32'b0;
         else begin
             case (reg_sel)
-                REG_TXDATA: rdata = {24'b0, tx_data};
-                REG_RXDATA: rdata = {22'b0, tx_busy, rx_ready, rx_data};
-                REG_STATUS: rdata = {30'b0, rx_ready, tx_busy};
-                REG_BAUD:   rdata = baud_reg;
-                default:    rdata = 32'b0;
+                REG_TXDATA: rdata_comb = {24'b0, tx_data};
+                REG_RXDATA: rdata_comb = {22'b0, tx_busy, rx_ready, rx_data};
+                REG_STATUS: rdata_comb = {30'b0, rx_ready, tx_busy};
+                REG_BAUD:   rdata_comb = baud_reg;
+                default:    rdata_comb = 32'b0;
             endcase
         end
+    end
+
+    always_ff @(posedge clk_sys or negedge rst_sys) begin
+        if (rst_sys == `RESET_EN) rdata <= 32'b0;
+        else if (sel && re)       rdata <= rdata_comb;
     end
 
     assign tx_o = tx_line;

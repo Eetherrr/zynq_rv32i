@@ -1,22 +1,35 @@
 `timescale 1ns / 1ps
 `include "sys_define.svh"
-// tb_mem — 访存阶段：对齐检查、字节通道搬移、字节使能、加载扩展
+// tb_mem — 访存通路：请求生成（MEM_req）+ 读数据通路（MEM_load）
+//   MEM_req 在 EX 级产生地址/写数据/字节使能（地址提前一拍，
+//   让 BRAM 的 1 拍读延迟正好落在 MEM 级）；
+//   MEM_load 在 MEM 级做对齐检查、通道提取、符号/零扩展。
 // 运行: vivado -nolog -nojournal -mode batch -source scripts/run_unit.tcl \
-//        -tclargs tb_mem rtl/Core/MEM/MEM.sv
+//        -tclargs tb_mem rtl/Core/MEM/MEM_req.sv rtl/Core/MEM/MEM_load.sv
 module tb_mem;
-    logic [`DATA_BUS] mem_alu_result, mem_rs2_data, mem_rdata;
-    logic [1:0] mem_size;
-    logic       mem_read, mem_write, mem_unsigned;
-    logic [`DATA_BUS] mem_addr, mem_wdata, mem_rdata_ext;
-    logic [3:0] mem_be;
-    logic       mem_req, mem_we, mem_align_err;
+    // ---- MEM_req ----
+    logic [`DATA_BUS] mem_alu_result, mem_rs2_data;
+    logic [1:0]       mem_size;
+    logic             mem_read, mem_write;
+    logic [`DATA_BUS] mem_addr, mem_wdata;
+    logic [3:0]       mem_be;
+    logic             mem_req, mem_we;
 
-    MEM u_dut (.mem_alu_result(mem_alu_result), .mem_rs2_data(mem_rs2_data),
-               .mem_size(mem_size), .mem_read(mem_read), .mem_write(mem_write),
-               .mem_unsigned(mem_unsigned), .mem_rdata(mem_rdata),
-               .mem_addr(mem_addr), .mem_wdata(mem_wdata), .mem_be(mem_be),
-               .mem_req(mem_req), .mem_we(mem_we),
-               .mem_rdata_ext(mem_rdata_ext), .mem_align_err(mem_align_err));
+    // ---- MEM_load ----
+    logic [`DATA_BUS] mem_rdata, mem_rdata_ext;
+    logic             mem_unsigned, mem_align_err;
+
+    MEM_req u_req (
+        .mem_alu_result(mem_alu_result), .mem_rs2_data(mem_rs2_data),
+        .mem_size(mem_size), .mem_read(mem_read), .mem_write(mem_write),
+        .mem_addr(mem_addr), .mem_wdata(mem_wdata), .mem_be(mem_be),
+        .mem_req(mem_req), .mem_we(mem_we));
+
+    MEM_load u_load (
+        .mem_alu_result(mem_alu_result), .mem_size(mem_size),
+        .mem_read(mem_read), .mem_write(mem_write),
+        .mem_unsigned(mem_unsigned), .mem_rdata(mem_rdata),
+        .mem_rdata_ext(mem_rdata_ext), .mem_align_err(mem_align_err));
 
     int errors = 0, checks = 0;
     task automatic ck32(input string n, input logic [31:0] g, input logic [31:0] e);
@@ -30,17 +43,17 @@ module tb_mem;
 
     initial begin
         $display("==========================================================");
-        $display(" tb_mem - 访存对齐 / 通道 / 扩展验证");
+        $display(" tb_mem - 访存请求生成 / 对齐 / 通道 / 扩展验证");
         $display("==========================================================");
         mem_read=0; mem_write=0; mem_unsigned=0; mem_size=`MSZ_W;
         mem_alu_result=0; mem_rs2_data=0; mem_rdata=0; #1;
 
-        $display("\n-- mem_req / mem_we --");
+        $display("\n-- MEM_req: mem_req / mem_we --");
         mem_read=1; mem_write=0; #1; ck1("读: req=1 we=0", mem_req, 1'b1); ck1("读: we=0", mem_we, 1'b0);
         mem_read=0; mem_write=1; #1; ck1("写: req=1 we=1", mem_req, 1'b1); ck1("写: we=1", mem_we, 1'b1);
         mem_read=0; mem_write=0; #1; ck1("空闲: req=0", mem_req, 1'b0);
 
-        $display("\n-- 地址对齐检查 --");
+        $display("\n-- MEM_load: 地址对齐检查 --");
         mem_read=1; mem_write=0;
         mem_size=`MSZ_B; mem_alu_result=32'h1001; #1; ck1("字节 任意地址 无对齐错", mem_align_err, 1'b0);
         mem_size=`MSZ_H; mem_alu_result=32'h1000; #1; ck1("半字 偶地址 ok", mem_align_err, 1'b0);
@@ -52,7 +65,7 @@ module tb_mem;
         mem_read=0; mem_write=0; mem_size=`MSZ_W; mem_alu_result=32'h1001; #1;
         ck1("非访存不报对齐错", mem_align_err, 1'b0);
 
-        $display("\n-- 字节使能（写） --");
+        $display("\n-- MEM_req: 字节使能（写） --");
         mem_write=1; mem_read=0;
         mem_rs2_data = 32'hAABB_CCDD;
         mem_size=`MSZ_B; mem_alu_result=32'h0; #1; ck32("SB @0 be=0001", {28'b0,mem_be}, 32'h1);
@@ -63,7 +76,7 @@ module tb_mem;
         mem_alu_result=32'h2; #1; ck32("SH @2 be=1100", {28'b0,mem_be}, 32'hC);
         mem_size=`MSZ_W; mem_alu_result=32'h0; #1; ck32("SW be=1111", {28'b0,mem_be}, 32'hF);
 
-        $display("\n-- 写数据字节通道对齐 --");
+        $display("\n-- MEM_req: 写数据字节通道对齐 --");
         mem_size=`MSZ_B;
         mem_alu_result=32'h0; #1; ck32("SB @0 数据在 lane0", mem_wdata, 32'h0000_00DD);
         mem_alu_result=32'h1; #1; ck32("SB @1 数据在 lane1", mem_wdata, 32'h0000_DD00);
@@ -74,7 +87,7 @@ module tb_mem;
         mem_alu_result=32'h2; #1; ck32("SH @2 高半字", mem_wdata, 32'hCCDD_0000);
         mem_size=`MSZ_W; mem_alu_result=32'h0; #1; ck32("SW 全字", mem_wdata, 32'hAABB_CCDD);
 
-        $display("\n-- 加载数据提取 + 符号/零扩展 --");
+        $display("\n-- MEM_load: 加载数据提取 + 符号/零扩展 --");
         mem_read=1; mem_write=0;
         mem_rdata = 32'h807F_80FF;   // lane0=FF lane1=80 lane2=7F lane3=80
         mem_size=`MSZ_B; mem_unsigned=0;
@@ -97,7 +110,7 @@ module tb_mem;
         mem_read=0; mem_write=0; mem_size=`MSZ_W; mem_alu_result=32'h0; #1;
         ck32("非 load 输出 0", mem_rdata_ext, 32'h0);
 
-        $display("\n-- mem_addr 直通 ALU 结果 --");
+        $display("\n-- mem_addr 直通 ALU 结果（EX 级提前发起地址）--");
         mem_alu_result = 32'hDEAD_BEEF; #1;
         ck32("mem_addr = alu_result", mem_addr, 32'hDEAD_BEEF);
 

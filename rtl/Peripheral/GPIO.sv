@@ -103,20 +103,30 @@ module GPIO #(
 
     //==================================================================
     // 读回
+    //   寄存一拍输出，与 ROM/RAM（BMG 寄存输出）统一为
+    //   「T 拍给地址、T+1 拍数据有效」：CPU 在 EX 级发起地址，
+    //   MEM 级取回数据，RIB 读回按「上一拍片选」对齐。
     //==================================================================
+    logic [31:0] rdata_comb;
+
     always_comb begin
         if (rst_sys == `RESET_EN)
-            rdata = 32'b0;
+            rdata_comb = 32'b0;
         else if (!sel || !re)
-            rdata = 32'b0;
+            rdata_comb = 32'b0;
         else begin
             case (reg_sel)
-                REG_DATA: rdata = {{(32 - WIDTH) {1'b0}}, gpio_i};
-                REG_DIR:  rdata = {{(32 - WIDTH) {1'b0}}, dir_reg};
-                REG_IN:   rdata = {{(32 - WIDTH) {1'b0}}, gpio_i};
-                default:  rdata = 32'b0;    // SET / CLR 读回 0
+                REG_DATA: rdata_comb = {{(32 - WIDTH) {1'b0}}, gpio_i};
+                REG_DIR:  rdata_comb = {{(32 - WIDTH) {1'b0}}, dir_reg};
+                REG_IN:   rdata_comb = {{(32 - WIDTH) {1'b0}}, gpio_i};
+                default:  rdata_comb = 32'b0;   // SET / CLR 读回 0
             endcase
         end
+    end
+
+    always_ff @(posedge clk_sys or negedge rst_sys) begin
+        if (rst_sys == `RESET_EN) rdata <= 32'b0;
+        else if (sel && re)       rdata <= rdata_comb;
     end
 
     //==================================================================

@@ -189,23 +189,33 @@ module SPI (
 
     //==================================================================
     // 读回
+    //   寄存一拍输出，与 ROM/RAM（BMG 寄存输出）统一为
+    //   「T 拍给地址、T+1 拍数据有效」：CPU 在 EX 级发起地址，
+    //   MEM 级取回数据，RIB 读回按「上一拍片选」对齐。
     //==================================================================
+    logic [31:0] rdata_comb;
+
     always_comb begin
         if (rst_sys == `RESET_EN)
-            rdata = 32'b0;
+            rdata_comb = 32'b0;
         else if (!sel || !re)
-            rdata = 32'b0;
+            rdata_comb = 32'b0;
         else begin
             case (reg_sel)
-                REG_TXDATA: rdata = {24'b0, tx_data};
-                REG_RXDATA: rdata = {22'b0, busy_reg, done_reg, rx_data};
-                REG_CTRL:   rdata = {27'b0, cs_reg, cpha_reg, cpol_reg,
-                                     1'b0, en_reg};
-                REG_DIV:    rdata = {16'b0, div_reg};
-                REG_STATUS: rdata = {30'b0, done_reg, busy_reg};
-                default:    rdata = 32'b0;
+                REG_TXDATA: rdata_comb = {24'b0, tx_data};
+                REG_RXDATA: rdata_comb = {22'b0, busy_reg, done_reg, rx_data};
+                REG_CTRL:   rdata_comb = {27'b0, cs_reg, cpha_reg, cpol_reg,
+                                          1'b0, en_reg};
+                REG_DIV:    rdata_comb = {16'b0, div_reg};
+                REG_STATUS: rdata_comb = {30'b0, done_reg, busy_reg};
+                default:    rdata_comb = 32'b0;
             endcase
         end
+    end
+
+    always_ff @(posedge clk_sys or negedge rst_sys) begin
+        if (rst_sys == `RESET_EN) rdata <= 32'b0;
+        else if (sel && re)       rdata <= rdata_comb;
     end
 
     //==================================================================

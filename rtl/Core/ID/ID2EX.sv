@@ -27,6 +27,9 @@ module ID2EX (
     input  wire [      0:0]  id_op2_sel,
     input  wire [`DATA_BUS]  id_op1,            // ID 模块选好的 op1
     input  wire [`DATA_BUS]  id_op2,            // ID 模块选好的 op2
+    input  wire [`DATA_BUS]  id_rs2_data,       // 寄存器堆读出的原始 rs2
+                                                //  （store 数据用它，不能用 op2：
+                                                //   S 型 op2_sel=IMM，是地址偏移量）
     input  wire [`DATA_BUS]  id_imm,
     input  wire [      1:0]  id_wb_sel,
     input  wire [      1:0]  id_mem_size,
@@ -53,6 +56,7 @@ module ID2EX (
     output logic [      0:0] id_ex_op2_sel,
     output logic [`DATA_BUS] id_ex_op1,
     output logic [`DATA_BUS] id_ex_op2,
+    output logic [`DATA_BUS] id_ex_rs2_data,
     output logic [`DATA_BUS] id_ex_imm,
     output logic [      1:0] id_ex_wb_sel,
     output logic [      1:0] id_ex_mem_size,
@@ -82,6 +86,7 @@ module ID2EX (
             id_ex_op2_sel       <= `OP2_RS2;
             id_ex_op1           <= 32'b0;
             id_ex_op2           <= 32'b0;
+            id_ex_rs2_data      <= 32'b0;
             id_ex_imm           <= 32'b0;
             id_ex_wb_sel        <= `WB_ALU;
             id_ex_mem_size      <= `MSZ_W;
@@ -109,6 +114,7 @@ module ID2EX (
             id_ex_op2_sel       <= `OP2_RS2;
             id_ex_op1           <= 32'b0;
             id_ex_op2           <= 32'b0;
+            id_ex_rs2_data      <= 32'b0;
             id_ex_imm           <= 32'b0;
             id_ex_wb_sel        <= `WB_ALU;
             id_ex_mem_size      <= `MSZ_W;
@@ -136,6 +142,7 @@ module ID2EX (
             id_ex_op2_sel       <= id_op2_sel;
             id_ex_op1           <= id_op1;
             id_ex_op2           <= id_op2;
+            id_ex_rs2_data      <= id_rs2_data;
             id_ex_imm           <= id_imm;
             id_ex_wb_sel        <= id_wb_sel;
             id_ex_mem_size      <= id_mem_size;

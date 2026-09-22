@@ -107,20 +107,30 @@ module TIMER (
     end
 
     //---- 读回 ----
+    //   读数据寄存一拍后送出，与 ROM/RAM（BMG 寄存输出）统一为
+    //   「T 拍给地址、T+1 拍数据有效」：CPU 在 EX 级发起访存地址，
+    //   MEM 级（下一拍）取回数据，RIB 的读回也按「上一拍片选」对齐。
+    logic [31:0] rdata_comb;
+
     always_comb begin
         if (rst_sys == `RESET_EN)
-            rdata = 32'b0;
+            rdata_comb = 32'b0;
         else if (!sel || !re)
-            rdata = 32'b0;
+            rdata_comb = 32'b0;
         else begin
             case (reg_sel)
-                REG_LOAD:   rdata = load_reg;
-                REG_COUNT:  rdata = count_reg;
-                REG_CTRL:   rdata = {29'b0, oneshot_reg, irq_en_reg, en_reg};
-                REG_STATUS: rdata = {31'b0, overflow_reg};
-                default:    rdata = 32'b0;
+                REG_LOAD:   rdata_comb = load_reg;
+                REG_COUNT:  rdata_comb = count_reg;
+                REG_CTRL:   rdata_comb = {29'b0, oneshot_reg, irq_en_reg, en_reg};
+                REG_STATUS: rdata_comb = {31'b0, overflow_reg};
+                default:    rdata_comb = 32'b0;
             endcase
         end
+    end
+
+    always_ff @(posedge clk_sys or negedge rst_sys) begin
+        if (rst_sys == `RESET_EN) rdata <= 32'b0;
+        else if (sel && re)       rdata <= rdata_comb;
     end
 
     assign irq_o = overflow_reg & irq_en_reg;

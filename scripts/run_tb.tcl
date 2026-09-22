@@ -56,6 +56,20 @@ foreach ip {ROM RAM} {
     }
 }
 
+# ---- Block Memory Generator 行为模型 ----
+#   ROM.v / RAM.v 只是 IP 的例化壳，内部例化 blk_mem_gen_v8_4_5，
+#   该模块来自 Vivado 安装目录下的 IP 行为模型，必须一并编译，
+#   否则 xelab 会报 "Module <blk_mem_gen_v8_4_5> not found"。
+if {[info exists ::env(XILINX_VIVADO)] && $::env(XILINX_VIVADO) ne ""} {
+    set bmg "$::env(XILINX_VIVADO)/data/ip/xilinx/blk_mem_gen_v8_4/simulation/blk_mem_gen_v8_4.v"
+    if {[file exists $bmg]} {
+        lappend ip_files $bmg
+        puts "==> Block Memory Generator 行为模型：$bmg"
+    } else {
+        puts "==> 警告：未找到 BMG 行为模型 $bmg"
+    }
+}
+
 puts "==> RTL [llength $rtl_files] 个，TB [llength $tb_files] 个，IP [llength $ip_files] 个"
 
 # ---- 在 sim/xsim_run 下编译运行，产物集中在 sim/（已被 gitignore） ----
@@ -64,8 +78,15 @@ file mkdir $run_dir
 cd $run_dir
 
 # ---- IP 初始化文件必须放在运行目录（BLK_MEM_GEN 会按 C_INIT_FILE 查找）----
+#   ROM 的内容以 tb/prog/ROM.mif（由 tb/prog/gen_cpu_test.py 生成）为准：
+#   先复制 IP 目录下的 mif，再用 tb/prog/ROM.mif 覆盖，这样改了测试程序
+#   不需要重新生成 IP 就能仿真。
 foreach f [glob -nocomplain "$root_dir/prj/zynq_rv32i.gen/sources_1/ip/*/*.mif"] {
     file copy -force $f $run_dir
+}
+if {[file exists "$root_dir/tb/prog/ROM.mif"]} {
+    file copy -force "$root_dir/tb/prog/ROM.mif" $run_dir
+    puts "==> ROM 镜像：tb/prog/ROM.mif（覆盖 IP 生成的 ROM.mif）"
 }
 foreach f [glob -nocomplain "$root_dir/prj/zynq_rv32i.ip_user_files/mem_init_files/*.coe"] {
     file copy -force $f $run_dir

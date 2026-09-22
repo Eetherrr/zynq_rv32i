@@ -53,7 +53,7 @@ module CPU_top (
     wire             id_illegal, id_ecall, id_ebreak, id_fence;
 
     // ---- ID2EX ----
-    wire [`DATA_BUS] id_ex_pc, id_ex_op1, id_ex_op2, id_ex_imm;
+    wire [`DATA_BUS] id_ex_pc, id_ex_op1, id_ex_op2, id_ex_rs2_data, id_ex_imm;
     wire [`ADDR_BUS] id_ex_rs1_addr, id_ex_rs2_addr, id_ex_rd_addr;
     wire             id_ex_rd_we;
     wire [3:0]       id_ex_alu_op;
@@ -81,9 +81,9 @@ module CPU_top (
     wire             mem_read_from_ex, mem_write_from_ex, mem_unsigned_from_ex;
 
     // ---- MEM ----
-    wire [`DATA_BUS] mem_addr, mem_wdata;
-    wire [3:0]       mem_be;
-    wire             mem_req, mem_we, mem_align_err;
+    wire             mem_align_err;      // 对齐检查（MEM_load 输出）
+    wire [`DATA_BUS] mem_rdata_ext_c;    // MEM 级组合提取出的 load 数据
+    // 访存地址/数据/字节使能由 EX 级的 MEM_req 产生，见下方第 5 节
 
     // ---- MEM2WB ----
     wire [`DATA_BUS] wb_alu_result, wb_rdata, wb_pc4, wb_wdata;
@@ -101,20 +101,38 @@ module CPU_top (
     // 说明：PC 的跳转/停顿实际由 PCReg 的 jmp_flag / stall 端口完成
     //       （见下方 u_PCReg 例化），此处不再保留冗余的 pc_load 逻辑。
 
-    // ---- 取指总线停顿 ----
-    // 取指与数据访问共用 RIB，而 RIB 每拍只服务一个主机。数据访问占用
-    // 总线的周期里取指端口拿不到授权，rom_instr_i 会是上一次取指的结果，
-    // 因此必须冻结 PC 与 IF2ID，否则过期指令会进入 ID 级。
+    // ---- 取指侧与 ROM 1 拍读延迟的配合（重要）----
     //
-    // 优先级约定（见 CPU_SOC_top）：数据口 = m0，取指口 = m1。
-    wire if_bus_stall = bus_grant_valid_i & ~if_grant_i;
+    //  ROM 是寄存输出：T 拍给出地址 A(T)，T+1 拍 douta = I(A(T))。
+    //  IF2ID 在 T+1 拍沿锁存到的是「T-1 拍给出的地址」对应的指令，所以：
+    //      · instr_addr_i 必须用延后一拍的 PC（if_pc_d1），否则锁存的
+    //        (指令, 地址) 会差 4 字节，EX 算出的一切分支/跳转目标都偏移；
+    //      · 想让 IF2ID 锁存到地址 A，就要在 A 出现在 if_pc 的那一拍
+    //        （而不是下一拍）准备好 —— 由此得到下面两条控制规则：
+    //          注入 NOP ：丢弃「本拍 ROM 输出」→ 下一拍沿写入 NOP；
+    //          冻结 PC  ：让同一地址连出两拍 → 下一拍沿会再收到一次同样的
+    //                     指令（配合 IF2ID 保持，就得到一次「停顿」）。
+    //
+    //  取指与数据访问共用 RIB，数据口（m0）优先级高于取指口（m1）。
+    //  数据访问的那一拍，ROM 的地址输入被换成数据地址并被寄存，于是：
+    //      T   拍：本应取的地址没送进 ROM → 冻结 PC，让 T+1 拍重发同地址
+    //      T+1 拍：ROM 输出的是数据地址对应的内容（对取指无意义）
+    //              → 在 T+1 拍注入 NOP，把它在 T+2 拍沿丢弃
+    //  注意「冻结比注入早一拍」；两者同拍会把指令流弄乱。
+    wire if_bus_stall = bus_grant_valid_i & ~if_grant_i;   // 本拍取指口被抢
 
-    // ---- 重定向后的一拍气泡 ----
-    // 分支/跳转在 EX 级解析后，PC 当拍就跳到目标地址，但 ROM 是寄存输出：
-    // 目标地址的指令要再过一拍才出现在 rom_instr_i 上。若不补这一拍，
-    // 重定向后的第一个沿会把「旧地址的指令」锁进 IF2ID 并执行 ——
-    // 现象就是分支/跳转后多跑一条错误指令。
-    // 这里用 redirect_d1 在重定向的下一拍冻结 PC 并注入 NOP。
+    logic if_bus_stall_d1;
+    always_ff @(posedge clk_sys or negedge rst_sys) begin
+        if (rst_sys == `RESET_EN) if_bus_stall_d1 <= 1'b0;
+        else                      if_bus_stall_d1 <= if_bus_stall;
+    end
+
+    // ---- 重定向后的两个气泡 ----
+    //   分支/跳转在 EX 级解析后 PC 当拍跳到目标；ROM 又要再等一拍才给出目标
+    //   地址的指令，因此「重定向当拍」与「重定向后一拍」各注入一个 NOP，
+    //   把错误路径上已进入取指流水线的一条指令和一条在途指令丢掉。
+    //   ★ 这里不能冻结 PC：地址连出两拍会让目标指令被锁进 IF2ID 两次
+    //     （现象为分支目标指令重复执行，例如循环变量被多加一次）。
     logic redirect_d1;
     always_ff @(posedge clk_sys or negedge rst_sys) begin
         if (rst_sys == `RESET_EN) redirect_d1 <= 1'b0;
@@ -122,27 +140,33 @@ module CPU_top (
     end
     wire flush_bubble = redirect_d1;
 
-    // 取指地址必须与 ROM 的 1 拍延迟对齐：
-    //   ROM 语义是「T 拍给 addr，T+1 拍沿 douta 才是该地址的指令」。
-    //   IF2ID 在 T+1 拍沿锁存该指令，而 instr_o 与 instr_addr_o 用的是
-    //   同一组输入，所以 instr_addr_i 必须是「T 拍的 PC」= 延后一拍的 PC。
-    //   若直接用 if_pc，锁存出的地址会比它携带的指令新的 4 字节，
-    //   导致 EX 级 pc+imm 算出的所有分支/跳转目标偏移 4 字节。
+    // 取指地址配对：见上面说明，必须用延后一拍的 PC
     logic [`DATA_BUS] if_pc_d1;
     always_ff @(posedge clk_sys or negedge rst_sys) begin
         if (rst_sys == `RESET_EN) if_pc_d1 <= `PC_RESET;
         else                      if_pc_d1 <= if_pc;
     end
 
-    //
-    // PC 与 IF2ID 的 stall 只由真正的流水线停顿驱动；总线停顿用下面的
-    // 「气泡注入」处理：冻结 PC（下一拍重新取指），并把本拍因为丢失授权
-    // 而变得过期的指令换成 NOP，避免 ID 重复执行同一条指令（那会导致死锁）。
-    wire if_stall = stall_pc    | hold_flag_i | flush_bubble;
+    // PC 停顿：数据访问抢占总线的当拍冻结 PC（下一拍重发同一地址）；
+    // load-use / RAW 都不需要停顿（全前递，见 Control.sv）
+    wire if_stall = stall_pc | hold_flag_i | if_bus_stall;
     wire id_stall = stall_if2id;
 
-    // 总线停顿 / 重定向气泡期间，送入 IF2ID 的指令固定为 NOP
-    wire [`DATA_BUS] if_instr_gated = (if_bus_stall | flush_bubble) ? `INST_NOP : if_instr;
+    // ---- 复位释放后的第一个取指槽 ----
+    //   复位期间 PC 一直停在复位向量上，ROM 会反复寄存该地址，于是复位
+    //   释放后头两拍 ROM 输出的是同一条指令，IF2ID 会把首条指令锁两次
+    //   （表现为复位后第一条指令执行两遍）。这里在复位释放后的第一拍
+    //   注入一个 NOP，把重复的那一拍吃掉，取指流从复位向量开始连续。
+    logic rst_sys_d1;
+    always_ff @(posedge clk_sys or negedge rst_sys) begin
+        if (rst_sys == `RESET_EN) rst_sys_d1 <= `RESET_EN;
+        else                      rst_sys_d1 <= `RESET_DIS;
+    end
+    wire fetch_warmup = (rst_sys != `RESET_EN) && (rst_sys_d1 == `RESET_EN);
+
+    // 气泡注入：总线抢占用「延后一拍」，重定向用「当拍 + 延后一拍」
+    wire [`DATA_BUS] if_instr_gated =
+        (if_bus_stall_d1 | flush_bubble | fetch_warmup) ? `INST_NOP : if_instr;
 
     //==================================================================
     // 2. IF 阶段
@@ -243,6 +267,7 @@ module CPU_top (
         .id_op2_sel      (id_op2_sel),
         .id_op1          (id_op1),
         .id_op2          (id_op2),
+        .id_rs2_data     (id_rs2_data),     // 原始 rs2（store 数据源）
         .id_imm          (id_imm),
         .id_wb_sel       (id_wb_sel),
         .id_mem_size     (id_mem_size),
@@ -268,6 +293,7 @@ module CPU_top (
         .id_ex_op2_sel      (id_ex_op2_sel),
         .id_ex_op1          (id_ex_op1),
         .id_ex_op2          (id_ex_op2),
+        .id_ex_rs2_data     (id_ex_rs2_data),
         .id_ex_imm          (id_ex_imm),
         .id_ex_wb_sel       (id_ex_wb_sel),
         .id_ex_mem_size     (id_ex_mem_size),
@@ -290,16 +316,23 @@ module CPU_top (
     EX u_EX (
         .id_ex_op1        (id_ex_op1),
         .id_ex_op2        (id_ex_op2),
+        .id_ex_rs2_data   (id_ex_rs2_data),   // store 数据用它，不用 op2
         .id_ex_rs1_addr   (id_ex_rs1_addr),
         .id_ex_rs2_addr   (id_ex_rs2_addr),
         .id_ex_op1_sel    (id_ex_op1_sel),
         .id_ex_op2_sel    (id_ex_op2_sel),
 
-        // EX/MEM 前递源
+        // EX/MEM 前递源 —— 用「当前 MEM 级」的原值。
+        //   · 非 load：前递 ALU 结果；
+        //   · load   ：前递 MEM 级组合提取出的 load 数据（ex_mem_load_data）。
+        //     访存地址在 EX 级发起，BRAM 的 1 拍延迟正好落在 MEM 级，所以
+        //     依赖指令在 EX 级的那一拍，load 正在 MEM 级且数据已可用 ——
+        //     这正是本设计不需要 load-use 停顿的原因。
         .ex_mem_rd_addr   (mem_rd_addr),
         .ex_mem_alu_result(mem_alu_result),
         .ex_mem_rd_we     (mem_rd_we),
-        .ex_mem_mem_read  (mem_read_from_ex),    // 关键: load 时禁止 EX/MEM 前递
+        .ex_mem_mem_read  (mem_read_from_ex),    // MEM 级是否为 load
+        .ex_mem_load_data (mem_rdata_ext_c),     // load 数据（MEM 级组合提取）
 
         // MEM/WB 前递源
         .mem_wb_rd_addr   (wb_rd_addr),
@@ -380,40 +413,61 @@ module CPU_top (
     // 5. MEM 阶段
     //
     // 访存读数据对齐（ROM/RAM 均为 IP 寄存输出，读延迟 1 拍）
-    //   IP 语义：T 拍给 addr，T+1 拍沿 rdata 才是该 addr 的数据。
-    //   MEM 级在 T 拍给出 mem_addr 与写回控制；ram_data_i 在 T+1 拍沿
-    //   变为该地址的数据。此时 MEM 的组合提取/扩展逻辑得到的就是正确
-    //   数据，而 MEM2WB 恰好也在 T+1 拍沿锁存 —— 控制与数据同拍对齐，
-    //   因此这里直接送组合结果，不需要再额外打一拍（多打一拍会让
-    //   load 数据晚一拍，与写回控制错位）。
+    //   IP 语义：T 拍给 addr，T+1 拍 douta 才是该 addr 的数据。
+    //
+    //   旧做法在 MEM 级才给地址，于是提取用的 mem_alu_result[1:0] 与
+    //   ram_data_i 永远差一拍（数据回来时地址已前进），lw/lbu/lhu 读回错。
+    //
+    //   现做法：**地址连同 we/be/wdata 提前到 EX 级发起**（MEM_req），
+    //   BRAM 的 1 拍延迟正好落在 MEM 级 ——
+    //     EX 拍 ：mem_addr = ALU 结果（BRAM 在本拍沿寄存该地址）
+    //     MEM 拍：ram_data_i = mem[mem_alu_result]，而 mem_alu_result 就是
+    //             EX 拍那个 ALU 结果的流水寄存器值 → 通道选择天然对齐，
+    //             MEM2WB 与写回控制同拍锁存，无需任何额外延迟或停顿。
+    //   同时 MEM 级组合提取出的 mem_rdata_ext 也直接前递给 EX 级
+    //   （ex_mem_load_data），load-use 因此不需要停顿。
     //==================================================================
-    logic [`DATA_BUS] mem_rdata_ext_c;   // 数据提取 + 符号扩展结果
 
-    MEM u_MEM (
+    // ---- MEM 级：读数据提取 / 扩展 / 对齐检查 ----
+    MEM_load u_MEM_load (
         .mem_alu_result (mem_alu_result),
-        .mem_rs2_data   (mem_rs2_data),
         .mem_size       (mem_size_from_ex),
         .mem_read       (mem_read_from_ex),
         .mem_write      (mem_write_from_ex),
         .mem_unsigned   (mem_unsigned_from_ex),
-
-        .mem_rdata      (ram_data_i),      // IP 寄存输出（上一拍 addr 的数据）
-
-        .mem_addr       (mem_addr),
-        .mem_wdata      (mem_wdata),
-        .mem_be         (mem_be),
-        .mem_req        (mem_req),
-        .mem_we         (mem_we),
-
+        .mem_rdata      (ram_data_i),        // 1 拍前给出的地址的数据
         .mem_rdata_ext  (mem_rdata_ext_c),
         .mem_align_err  (mem_align_err)
     );
 
-    assign ram_addr_o = mem_addr;
-    assign ram_data_o = mem_wdata;
-    assign ram_be_o   = mem_be;
-    assign ram_we_o   = mem_we;
-    assign ram_re_o   = mem_req & ~mem_we;
+    // ---- EX 级：访存请求（地址 / 写数据 / 字节使能）----
+    //   放在 EX 级是本设计的关键（见 MEM_req 文件头）：
+    //   地址提前一拍，BRAM 的读延迟才落在 MEM 级。
+    logic [`DATA_BUS] ex_mem_addr, ex_mem_wdata;
+    logic [      3:0] ex_mem_be;
+    logic             ex_mem_req, ex_mem_we;
+
+    MEM_req u_MEM_req (
+        .mem_alu_result (ex_alu_result),     // EX 级 ALU 结果 = 访存地址
+        .mem_rs2_data   (ex_rs2_data),       // 前递后的 rs2
+        .mem_size       (id_ex_mem_size),
+        .mem_read       (id_ex_mem_read),
+        .mem_write      (id_ex_mem_write),
+
+        .mem_addr       (ex_mem_addr),
+        .mem_wdata      (ex_mem_wdata),
+        .mem_be         (ex_mem_be),
+        .mem_req        (ex_mem_req),
+        .mem_we         (ex_mem_we)
+    );
+
+    // 写请求只占 EX 一拍（在本拍沿落盘），读请求同样只占一拍，
+    // 数据由 RIB 在下一拍（MEM 级）按「上一拍片选」回送。
+    assign ram_addr_o = ex_mem_addr;
+    assign ram_data_o = ex_mem_wdata;
+    assign ram_be_o   = ex_mem_be;
+    assign ram_we_o   = ex_mem_we;
+    assign ram_re_o   = ex_mem_req & ~ex_mem_we;
 
     MEM2WB u_MEM2WB (
         .clk_sys        (clk_sys),
@@ -422,7 +476,7 @@ module CPU_top (
         .stall          (1'b0),
 
         .mem_alu_result (mem_alu_result),
-        .mem_rdata      (mem_rdata_ext_c),  // 提取+扩展结果，与写回控制同拍
+        .mem_rdata      (mem_rdata_ext_c),   // 提取+扩展结果，与写回控制同拍
         .mem_pc4        (mem_pc4),
         .mem_rd_addr    (mem_rd_addr),
         .mem_rd_we      (mem_rd_we),

@@ -1,6 +1,14 @@
 `timescale 1ns / 1ps
 `include "sys_define.svh"
-// tb_control — 冒险检测 / 冲刷 / 停顿 / 重定向
+// tb_control — 冒险检测 / 冲刷 / 重定向
+//
+//   ★ 本设计的微架构：全前递 + EX 级发起访存。
+//     - RAW：EX/MEM、MEM/WB 前递解决；
+//     - load-use：**不需要停顿**。访存地址在 EX 级发起，BRAM 的 1 拍读延迟
+//       落在 MEM 级，MEM 级组合提取出的 load 数据直接前递给紧随其后的指令
+//       （EX.sv 的 ex_mem_load_data）。因此 Control 不再产生数据冒险停顿，
+//       stall_* 恒为 0（保留端口给将来的多周期外设 / 结构冒险）。
+//     - 取指与数据访问抢总线时的 PC 冻结由 CPU_top 用 RIB 授权信号处理。
 // 运行: vivado -nolog -nojournal -mode batch -source scripts/run_unit.tcl \
 //        -tclargs tb_control rtl/Core/Control.sv
 module tb_control;
@@ -73,18 +81,22 @@ module tb_control;
         ck1("flush_if2id=0", flush_if2id, 1'b0);
         ck1("redirect_en=0", redirect_en, 1'b0);
 
-        $display("\n-- load-use 冒险：lw x5 后紧跟用 x5 --");
-        id_ex_mem_read=1; id_ex_rd_we=1; id_ex_rd_addr=5;
+        $display("\n-- load-use：本设计不停顿（靠 MEM→EX 数据前递）--");
+        idle(); id_ex_mem_read=1; id_ex_rd_we=1; id_ex_rd_addr=5;
         id_instr = r_type(0,5,1);  id_rs1_addr=5; id_rs2_addr=0; #1;   // add x1,x5,x0 用 rs1
-        ck1("rs1 命中 -> stall_pc", stall_pc, 1'b1);
-        ck1("rs1 命中 -> stall_if2id", stall_if2id, 1'b1);
-        ck1("rs1 命中 -> flush_id2ex", flush_id2ex, 1'b1);
+        ck1("rs1 命中 load: 不 stall_pc",    stall_pc,    1'b0);
+        ck1("rs1 命中 load: 不 stall_if2id", stall_if2id, 1'b0);
+        ck1("rs1 命中 load: 不 flush_id2ex", flush_id2ex, 1'b0);
 
         idle(); id_ex_mem_read=1; id_ex_rd_we=1; id_ex_rd_addr=5;
         id_instr = r_type(5,0,1); id_rs1_addr=0; id_rs2_addr=5; #1;    // 用 rs2
-        ck1("rs2 命中 -> stall_pc", stall_pc, 1'b1);
+        ck1("rs2 命中 load: 不 stall_pc",    stall_pc,    1'b0);
 
-        $display("\n-- 不构成冒险的情形 --");
+        idle(); id_ex_mem_read=1; id_ex_rd_we=1; id_ex_rd_addr=5;
+        id_instr = s_type(5,0); id_rs1_addr=5; #1;                     // store 用 rs1
+        ck1("store 命中 load: 不 stall_pc",  stall_pc,    1'b0);
+
+        $display("\n-- 其它情形同样不停顿 --");
         // 不是 load
         idle(); id_ex_mem_read=0; id_ex_rd_we=1; id_ex_rd_addr=5;
         id_instr = r_type(0,5,1); id_rs1_addr=5; #1;
@@ -101,14 +113,10 @@ module tb_control;
         idle(); id_ex_mem_read=1; id_ex_rd_we=1; id_ex_rd_addr=5;
         id_instr = r_type(0,6,1); id_rs1_addr=6; #1;
         ck1("地址不同 不 stall", stall_pc, 1'b0);
-        // 该指令不使用 rs1/rs2（如 lui）
+        // lui 不用源寄存器
         idle(); id_ex_mem_read=1; id_ex_rd_we=1; id_ex_rd_addr=5;
         id_instr = (20'h12345<<12)|(1<<7)|7'b0110111; id_rs1_addr=5; id_rs2_addr=0; #1;
         ck1("lui 不用源寄存器 不 stall", stall_pc, 1'b0);
-        // store 用 rs1/rs2
-        idle(); id_ex_mem_read=1; id_ex_rd_we=1; id_ex_rd_addr=5;
-        id_instr = s_type(5,0); id_rs1_addr=5; #1;
-        ck1("store 用 rs1 -> stall", stall_pc, 1'b1);
 
         $display("\n-- 分支重定向 --");
         idle(); ex_branch_taken=1; ex_branch_target=32'h0000_1234; #1;
@@ -145,12 +153,14 @@ module tb_control;
         idle(); #1;
         ck1("无异常: exception_en=0", exception_en, 1'b0);
 
-        $display("\n-- 重定向优先级高于 load-use --");
+        $display("\n-- 重定向与访存并存：以重定向为准 --");
         ex_branch_taken=1; ex_branch_target=32'h1000;
         id_ex_mem_read=1; id_ex_rd_we=1; id_ex_rd_addr=5;
         id_instr = r_type(0,5,1); id_rs1_addr=5; #1;
         ck1("重定向时 redirect_en=1", redirect_en, 1'b1);
         ck32("重定向时 pc 正确", redirect_pc, 32'h1000);
+        ck1("重定向时 flush_ex2mem", flush_ex2mem, 1'b1);
+        ck1("重定向时 stall 保持 0", stall_pc, 1'b0);
 
         $display("\n==========================================================");
         $display(" 共 %0d 项检查，失败 %0d 项", checks, errors);

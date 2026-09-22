@@ -50,7 +50,7 @@ export VIVADOPRJ_JOBS   := $(JOBS)
 export VIVADOPRJ_SIMRUN := $(SIM_RUN)
 export TB               := $(TB)
 
-.PHONY: all project refresh synth impl bitstream sim gui pins slang check tb clean distclean help
+.PHONY: all project refresh synth impl bitstream sim gui pins slang check tb unit clean distclean help
 
 all: bitstream
 
@@ -119,6 +119,18 @@ check:
 	@echo "==> RTL 检查（顶层 $(TOP)）"
 	$(VIVADO) -mode batch -source $(SCRIPT_DIR)/check_rtl.tcl \
 	          -nolog -nojournal
+
+# ---- 单模块验证（不涉及 IP，可独立运行） ----
+#   用法: make unit TB=tb_decoder RTL="rtl/Core/ID/Decoder.sv"
+unit:
+	@if [ -z "$(TB)" ] || [ -z "$(RTL)" ]; then \
+		echo "用法: make unit TB=<测试平台> RTL=\"<RTL 文件列表>\""; \
+		echo "例:   make unit TB=tb_decoder RTL=rtl/Core/ID/Decoder.sv"; \
+		exit 1; \
+	fi
+	@echo "==> 单模块验证：$(TB)"
+	$(VIVADO) -mode batch -source $(SCRIPT_DIR)/run_unit.tcl \
+	          -tclargs $(TB) $(RTL)
 
 # ---- 非工程模式运行测试平台（xsim） ----
 tb:

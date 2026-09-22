@@ -155,7 +155,6 @@ module RIB (
     logic        bus_we;
     logic        bus_re;
     logic [ 1:0] bus_size;
-    logic [31:0] bus_rdata;   // 被选中从机的读数据
 
     always_comb begin
         case (grant)
@@ -257,41 +256,79 @@ module RIB (
     assign s_gpio_size  = bus_size;
 
     //==================================================================
-    // 5. 从机读数据 MUX
+    // 5. 主机读回片选（与从机「1 拍读延迟」对齐）
+    //   从机（ROM / RAM 是 BMG 寄存输出，外设也寄存一拍）统一为
+    //     T 拍给 addr → T+1 拍 rdata 才是该地址的数据。
+    //   因此每个主机的读数据必须按「它上一拍获得授权时选中的从机」
+    //   回送，而不是按当前片选：
+    //     - 取指口持续请求，上一拍片选 == 当前片选，行为与旧版一致；
+    //     - 数据口一次读只占「地址拍」，数据在下一拍才回来。若不记住
+    //       上一拍的片选，下一拍总线已还给取指口，读回就会丢。
+    //   （这也是 CPU 侧「EX 级发起地址、MEM 级取数据」的对应实现。）
     //==================================================================
-    always_comb begin
-        if (s_rom_sel)
-            bus_rdata = s_rom_rdata;
-        else if (s_ram_sel)
-            bus_rdata = s_ram_rdata;
-        else if (s_timer_sel)
-            bus_rdata = s_timer_rdata;
-        else if (s_spi_sel)
-            bus_rdata = s_spi_rdata;
-        else if (s_uart_sel)
-            bus_rdata = s_uart_rdata;
-        else if (s_gpio_sel)
-            bus_rdata = s_gpio_rdata;
-        else
-            bus_rdata = 32'b0;   // 未映射地址读回 0
+    function automatic logic [5:0] slave_dec(input logic [31:0] a);
+        slave_dec = {((a & `GPIO_MASK)  == `GPIO_BASE),
+                     ((a & `UART_MASK)  == `UART_BASE),
+                     ((a & `SPI_MASK)   == `SPI_BASE),
+                     ((a & `TIMER_MASK) == `TIMER_BASE),
+                     ((a & `RAM_MASK)   == `RAM_BASE),
+                     ((a & `ROM_MASK)   == `ROM_BASE)};
+    endfunction
+
+    logic [5:0] m_sel_q [0:3];      // 各主机上一拍命中从机（独热）
+
+    integer mi;
+    always_ff @(posedge clk_sys or negedge rst_sys) begin
+        if (rst_sys == `RESET_EN) begin
+            for (mi = 0; mi < 4; mi = mi + 1)
+                m_sel_q[mi] <= 6'b0;
+        end
+        else begin
+            m_sel_q[0] <= grant[0] ? slave_dec(m0_addr) : 6'b0;
+            m_sel_q[1] <= grant[1] ? slave_dec(m1_addr) : 6'b0;
+            m_sel_q[2] <= grant[2] ? slave_dec(m2_addr) : 6'b0;
+            m_sel_q[3] <= grant[3] ? slave_dec(m3_addr) : 6'b0;
+        end
     end
 
-    //==================================================================
-    // 6. 读数据回送：把选中从机数据送还给被授权的主机
-    //==================================================================
-    always_comb begin
-        m0_rdata = 32'b0;
-        m1_rdata = 32'b0;
-        m2_rdata = 32'b0;
-        m3_rdata = 32'b0;
+    // 有效读回片选：
+    //   上一拍有访问 → 用上一拍片选（此时从机 rdata 正是那笔访问的数据）；
+    //   上一拍没有访问（复位后第一拍 / 被抢占后）→ 退回「当前授权主机」
+    //   的片选，与旧版组合读回一致，避免复位后第一拍读回 0 被当成
+    //   一条全 0（非法）指令执行。
+    logic [5:0]  m_sel_eff [0:3];
+    logic [31:0] m_addr_i  [0:3];
 
-        case (grant_id)
-            2'd0:    m0_rdata = bus_rdata;
-            2'd1:    m1_rdata = bus_rdata;
-            2'd2:    m2_rdata = bus_rdata;
-            2'd3:    m3_rdata = bus_rdata;
-            default: ;
-        endcase
+    always_comb begin
+        m_addr_i[0] = m0_addr;
+        m_addr_i[1] = m1_addr;
+        m_addr_i[2] = m2_addr;
+        m_addr_i[3] = m3_addr;
+
+        for (int m = 0; m < 4; m = m + 1)
+            m_sel_eff[m] = (m_sel_q[m] != 6'b0) ? m_sel_q[m]
+                          : (grant[m] ? slave_dec(m_addr_i[m]) : 6'b0);
+    end
+
+    logic [31:0] m_rdata [0:3];
+
+    always_comb begin
+        for (int m = 0; m < 4; m = m + 1) begin
+            case (m_sel_eff[m])
+                6'b000001: m_rdata[m] = s_rom_rdata;
+                6'b000010: m_rdata[m] = s_ram_rdata;
+                6'b000100: m_rdata[m] = s_timer_rdata;
+                6'b001000: m_rdata[m] = s_spi_rdata;
+                6'b010000: m_rdata[m] = s_uart_rdata;
+                6'b100000: m_rdata[m] = s_gpio_rdata;
+                default:   m_rdata[m] = 32'b0;      // 未映射地址
+            endcase
+        end
+
+        m0_rdata = m_rdata[0];
+        m1_rdata = m_rdata[1];
+        m2_rdata = m_rdata[2];
+        m3_rdata = m_rdata[3];
     end
 
 endmodule

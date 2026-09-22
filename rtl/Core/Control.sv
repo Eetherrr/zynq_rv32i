@@ -2,6 +2,24 @@
 
 `include "../sys_define.svh"
 
+//=====================================================================
+// Control : 冒险 / 控制单元
+//
+//   本流水线采用「全前递 + EX 级发起访存」的微架构，因此：
+//     - 普通 RAW 冒险：EX/MEM、MEM/WB 前递解决；
+//     - load-use 冒险：**不需要停顿**。访存地址在 EX 级发起（MEM_req），
+//       BRAM 的 1 拍读延迟落在 MEM 级，MEM 级组合提取出的 load 数据直接
+//       前递给紧随其后的指令（见 EX.sv 的 ex_mem_load_data）。
+//       依赖指令在 EX 级的那一拍，load 正好在 MEM 级，数据同拍可用。
+//     - 结构冒险：数据访问占用 RIB 时取指口丢一拍，由 CPU_top 冻结 PC
+//       并向 IF2ID 注入 NOP 处理（不经过本模块）。
+//
+//   因此本模块只产生「冲刷 + 重定向」：分支 / 跳转 / 异常在 EX 级解析，
+//   冲刷 ID / EX / MEM 三个下游流水寄存器，并把 PC 重定向到目标。
+//
+//   stall_* 三个输出保留（当前恒为 0），供将来接入需要等待的外设
+//   （由外设拉高 hold_flag_i 时在 CPU_top 侧冻结）或多周期访存使用。
+//=====================================================================
 module Control (
     input  wire              clk_sys,
     input  wire              rst_sys,
@@ -15,12 +33,12 @@ module Control (
     input  wire              ex_ecall,
     input  wire              ex_ebreak,
 
-    // EX 阶段当前指令 (来自 ID2EX)
+    // EX 阶段当前指令 (来自 ID2EX) —— 保留给将来实现异常 / 中断
     input  wire [`ADDR_BUS]  id_ex_rd_addr,
     input  wire              id_ex_rd_we,
     input  wire              id_ex_mem_read,
 
-    // ID 阶段当前指令
+    // ID 阶段当前指令 —— 保留给将来的冒险检测
     input  wire [`INST_BUS]  id_instr,
     input  wire [`ADDR_BUS]  id_rs1_addr,
     input  wire [`ADDR_BUS]  id_rs2_addr,
@@ -40,53 +58,20 @@ module Control (
     output logic             exception_en
 );
 
-    logic        id_uses_rs1, id_uses_rs2;
-    logic [6:0]  id_opcode;
-
-    assign id_opcode = id_instr[6:0];
-
-    always @(*) begin
-        id_uses_rs1 = `FALSE;
-        id_uses_rs2 = `FALSE;
-        case (id_opcode)
-            `INST_JALR,
-            `INST_TYPE_I,
-            `INST_TYPE_L: begin
-                id_uses_rs1 = `TRUE;
-            end
-            `INST_TYPE_S,
-            `INST_TYPE_B,
-            `INST_TYPE_R: begin
-                id_uses_rs1 = `TRUE;
-                id_uses_rs2 = `TRUE;
-            end
-            default: ;
-        endcase
-    end
-
-    logic redirect, exception, load_use_hazard;
+    logic redirect, exception;
 
     assign redirect  = ex_branch_taken | ex_jump_taken;
     assign exception = ex_illegal | ex_ecall | ex_ebreak;
 
-    // 注意：必须同时要求 id_ex_rd_we —— 若该 load 不写回（rd_we=0），
-    // 它不会产生 RAW 依赖，不应触发停顿。
-    assign load_use_hazard =
-           id_ex_mem_read
-        && id_ex_rd_we
-        && (id_ex_rd_addr != `REG_ZERO)
-        && (   (id_uses_rs1 && (id_ex_rd_addr == id_rs1_addr))
-            || (id_uses_rs2 && (id_ex_rd_addr == id_rs2_addr)));
-
     // flush: 全部下游流水寄存器清 NOP
     assign flush_if2id  = redirect | exception;
-    assign flush_id2ex  = redirect | exception | load_use_hazard;
+    assign flush_id2ex  = redirect | exception;
     assign flush_ex2mem = redirect | exception;
     assign flush_mem2wb = 1'b0;   // WB 阶段无需 flush
 
-    // stall: 仅 PC 与 IF2ID
-    assign stall_pc     = load_use_hazard;
-    assign stall_if2id  = load_use_hazard;
+    // stall: 当前微架构无数据冒险停顿（见文件头说明）
+    assign stall_pc     = 1'b0;
+    assign stall_if2id  = 1'b0;
     assign stall_id2ex  = 1'b0;
 
     // 重定向

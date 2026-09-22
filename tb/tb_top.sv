@@ -1,5 +1,5 @@
 `timescale 1ns / 1ps
-`include "../rtl/sys_define.svh"
+`include "sys_define.svh"
 
 //=====================================================================
 // tb_top — CPU 功能验证测试平台
@@ -44,7 +44,9 @@ module tb_top;
     parameter int  PROG_WORDS = 4096;                       // ROM 容量（字）
     parameter int  UART_DIV   = 867;                        // 与程序写入的 BAUD 一致
     parameter real BIT_NS     = (UART_DIV + 1) * CLK_PERIOD; // 一个位周期 ≈ 8680 ns
-    parameter real TIMEOUT_NS = 40000.0;                    // 4 万个时钟周期上限
+    // 超时上限：程序要发 3 个 UART 字节，每个位周期 8.68us、一帧 10 位，
+    // 单帧 ≈ 87us，因此上限取 2ms（20 万个时钟周期）比较稳妥。
+    parameter real TIMEOUT_NS = 2000000.0;
 
     //------------------------------------------------------------------
     // 时钟 / 复位
@@ -93,14 +95,55 @@ module tb_top;
     logic [31:0] result_w    = 32'hDEAD_DEAD;
 
     //------------------------------------------------------------------
+    // 结束判定：程序末尾停在固定挂死点
+    //   0x168 jal x0,0  结束挂死点（通过 / 失败都停在这里，
+    //                   通过与否看 RESULT 字）
+    // 注意：不能用「第一次写 RAM[0]」当结束标志 —— 程序中间（0x044）
+    //       就会写一次 RAM[0] 作为访存自检，那样会在程序跑完前就下结论。
+    //------------------------------------------------------------------
+    localparam logic [31:0] PC_HANG_PASS = 32'h0000_0168;
+    localparam logic [31:0] PC_HANG_FAIL = 32'h0000_0168;
+    bit          program_done = 1'b0;
+    int          hang_cnt     = 0;
+
+    // 说明：末尾是 `jal x0,0` 自跳，流水线在重定向前会先跑几拍，PC 并不是
+    //       每拍都等于挂死点（而是 4 拍一个来回），因此这里统计「命中次数」
+    //       而不是「连续拍数」。
+    always @(posedge clk_sys) begin
+        if (rst_sys == `RESET_DIS &&
+            (cur_pc == PC_HANG_PASS || cur_pc == PC_HANG_FAIL)) begin
+            hang_cnt <= hang_cnt + 1;
+            if (hang_cnt >= 3) program_done <= 1'b1;
+        end
+    end
+
+    //------------------------------------------------------------------
     // 取指对齐诊断：复位后头 20 拍，逐拍列出
     //   if_pc（PC 寄存器输出）/ rom_instr（ROM 锁定输出）
     //   / id_pc、id_instr（IF2ID 锁存结果）
     //   判断「指令是否与它应属的地址配对」。
     //   TRACE_MAX 设 0 可关闭。
     //------------------------------------------------------------------
-    int TRACE_MAX = 20;
+    int TRACE_MAX = 0;      // 关了取指对齐打印
     int fa_cnt = 0;
+
+    // 诊断用：写回 / 访存事务跟踪（TRACE_WB=1 打开）
+    bit TRACE_WB = 1'b0;
+    int wb_cnt = 0;
+    always @(posedge clk_sys) begin
+        if (TRACE_WB && rst_sys == `RESET_DIS && u_dut.u_CPU_top.wb_rd_we && wb_cnt < 80) begin
+            wb_cnt = wb_cnt + 1;
+            $display("[WB] pc=%h x%0d <= %h", u_dut.u_CPU_top.u_MEM2WB.wb_pc4 - 4,
+                     u_dut.u_CPU_top.wb_rd_addr, u_dut.u_CPU_top.wb_wdata);
+        end
+    end
+    always @(posedge clk_sys) begin
+        if (TRACE_WB && rst_sys == `RESET_DIS && (u_dut.cpu_ram_we | u_dut.cpu_ram_re))
+            $display("[BUS] a=%h we=%b re=%b d=%h | if_grant=%b valid=%b ifpc=%h rom=%h",
+                     u_dut.cpu_ram_addr, u_dut.cpu_ram_we, u_dut.cpu_ram_re,
+                     u_dut.cpu_ram_wdata, u_dut.if_grant, u_dut.bus_grant_valid,
+                     u_dut.u_CPU_top.if_pc, u_dut.u_CPU_top.if_instr);
+    end
 
     always @(posedge clk_sys) begin
         if (rst_async && fa_cnt < TRACE_MAX) begin
@@ -121,7 +164,9 @@ module tb_top;
             result_w    <= mem_wdata;
             result_seen <= 1'b1;
         end
-        if (cur_pc == 32'h0000_0100)
+        // 用 EX 级 PC 判断「真的执行了」：取指 PC 会超前，分支后面
+        // 那条错误路径指令可能只是被预取、随后被冲刷掉，不能算执行。
+        if (u_dut.u_CPU_top.id_ex_pc == 32'h0000_015c)
             reached_fail_path <= 1'b1;
     end
 
@@ -145,7 +190,7 @@ module tb_top;
         logic [7:0] d;
         int i;
         @(negedge uart_tx);                 // 起始位下降沿
-        #(BIT_NS);                          // → bit0 中间
+        #(BIT_NS * 1.5);                    // → bit0 中间（半位偏置）
         d[0] = uart_tx;
         for (i = 1; i < 8; i = i + 1) begin
             #(BIT_NS);
@@ -283,7 +328,7 @@ module tb_top;
         names[8]  = "x8_addi_7F";
         names[9]  = "x9_base_plus_1";
         names[10] = "x10_lbu";
-        names[11] = "x11_periph_base";
+        names[11] = "x11_uart_base";
         names[12] = "x12_addi_0";
         names[13] = "x13_uart_last_byte";
         names[14] = "x14_timer_status_w1";
@@ -295,7 +340,7 @@ module tb_top;
         names[20] = "GPIO_IN_loopback";
         names[21] = "TIMER_overflow_set";
         names[22] = "no_fail_path";
-        names[23] = "x28_addi_BEF";
+        names[23] = "x28_halfword_val";
         names[24] = "x29_neg_immediate";
         names[25] = "x30_final_zero";
 
@@ -330,13 +375,14 @@ module tb_top;
         // ---- 3. 等结果（带超时） ----
         fork : wait_result
             begin
-                wait (result_seen);
-                #(15 * CLK_PERIOD);     // 让流水线里的 store 落地、串口把 3 字节发完
-                $display("==> result written at t=%0t ns", $time);
+                wait (program_done);
+                #(15 * BIT_NS);         // 让流水线里的 store 落地、串口把 3 字节发完
+                $display("==> program finished at t=%0t ns (PC=%h)",
+                         $time, cur_pc);
             end
             begin
                 #(TIMEOUT_NS);
-                $display("[FATAL] timeout: no result within %0t ns", TIMEOUT_NS);
+                $display("[FATAL] timeout: program did not finish within %0t ns", TIMEOUT_NS);
                 errors = errors + 1;
             end
         join_any
@@ -362,14 +408,14 @@ module tb_top;
         check(8,  R[8],  32'h7F);
         check(9,  R[9],  `RAM_BASE + 32'd1);
         check(10, R[10], 32'h7F);           // lbu
-        check(11, R[11], 32'h2000_0000);    // lui x11, 0x20000
+        check(11, R[11], 32'h2000_0800);    // UART 基址 = 0x2000_0800
         check(12, R[12], 32'd0);            // addi x12, x0, 0
         check(13, R[13], 32'h0A);           // 最后一个 UART 字节 '\n'
         check(14, R[14], 32'd1);            // TIMER STATUS 写 1 清标志
         check(15, R[15], 32'd200);          // TIMER.LOAD 装载值
         // 半字访存相关寄存器（x30/x31 在程序末尾被复用，其正确性由程序内
         // 的 bne x31,x29 自检保证；这里核对未被复用的 x28 / x29）
-        check(23, u_dut.u_CPU_top.u_Regs.regs[28], 32'h1000_0EEF); // addi x28,x29,0xBEF
+        check(23, u_dut.u_CPU_top.u_Regs.regs[28], 32'h0000_BEEF); // lui+addi 拼出 0xBEEF
         check(24, u_dut.u_CPU_top.u_Regs.regs[29], 32'hFFFF_FBEF); // addi x29,x0,-0x411
         check(25, u_dut.u_CPU_top.u_Regs.regs[30], 32'h0);         // 末次 addi x30,x0,0
 
@@ -377,7 +423,12 @@ module tb_top;
         $display("-- 3) memory side effects --");
         $display("       (影子内存共记录 %0d 次 RAM 写)", ram_wr_cnt);
         check(16, peek_ram(0), 32'h1);                 // SW x6,0(x5)
-        check(17, peek_ram(192), 32'h0000_BEEF);       // SH x28,0(x29)
+        // 只写过低半字，高半字未初始化，这里只比较低半字
+        begin
+            logic [31:0] sh_w;
+            sh_w = peek_ram(192);
+            check(17, {16'b0, sh_w[15:0]}, 32'h0000_BEEF);   // SH x28,0(x29)
+        end
 
         $display("");
         $display("-- 4) GPIO side effects --");

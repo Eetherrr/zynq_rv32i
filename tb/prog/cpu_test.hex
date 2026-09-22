@@ -1,95 +1,109 @@
 //=====================================================================
 // cpu_test.hex — tb_top 使用的 RV32I 测试程序镜像
 //
-//   本文件由脚本汇编生成（见文件末尾的生成说明），不要手工改机器码。
+//   本文件由 tb/prog/gen_cpu_test.py 汇编生成，不要手工改机器码。
 //   行号 N 对应 ROM 字数地址 N，即字节地址 N*4。
 //
 //   地址映射（见 rtl/sys_define.svh）
 //     RAM   0x1000_0000    RESULT 在 0x1000_0000，半字测试在 0x1000_0300
 //     TIMER 0x2000_0000    LOAD +0 / COUNT +4 / CTRL +8 / STATUS +0x0C
+//     SPI   0x2000_0400
 //     UART  0x2000_0800    TXDATA +0 / RXDATA +4 / STATUS +8 / BAUD +0x0C
 //     GPIO  0x2000_0C00    DATA +0 / DIR +4 / SET +8 / CLR +0x0C
 //
-//   失败汇合点：0x124（写 RESULT=0 后挂死）
-//   通过挂死点：0x120
+//   结束：RESULT=1 通过 / RESULT=0 失败，随后停在末尾的 jal x0,0
 //
 //   运行： make tb TB=tb_top
 //=====================================================================
 
-00000093    // 0x000  addi x1, x0, 0       x1=0
-00a00113    // 0x004  addi x2, x0, 10      x2=10
-01400193    // 0x008  addi x3, x0, 20      x3=20
-00208233    // 0x00c  add  x4, x1, x2      x4=10 (RAW 前递)
-402181b3    // 0x010  sub  x3, x3, x2      x3=10
-0020f2b3    // 0x014  and  x5, x1, x2      x5=0
-0020e333    // 0x018  or   x6, x1, x2      x6=10
+00000093    // 0x000  addi x1, x0, 0        x1=0
+00a00113    // 0x004  addi x2, x0, 10       x2=10
+01400193    // 0x008  addi x3, x0, 20       x3=20
+00208233    // 0x00c  add  x4, x1, x2       x4=10 (RAW 前递)
+402181b3    // 0x010  sub  x3, x3, x2       x3=10
+0020f2b3    // 0x014  and  x5, x1, x2       x5=0
+0020e333    // 0x018  or   x6, x1, x2       x6=10
 00000013    // 0x01c  nop
 00000013    // 0x020  nop
-00000463    // 0x024  beq  x0, x0, +8      -> 0x02C  分支跳转
-00000337    // 0x028  lui  x6, 0           分支失败则破坏 x6
-00c0006f    // 0x02c  jal  x0, +12         -> 0x038  JAL
-00000337    // 0x030  lui  x6, 0           跳转失败则破坏 x6
+00000463    // 0x024  beq  x0, x0, +8       -> 0x02C
+00000337    // 0x028  lui  x6, 0            分支失败则破坏 x6
+00c0006f    // 0x02c  jal  x0, +12          -> 0x038
+00000337    // 0x030  lui  x6, 0            跳转失败则破坏 x6
 00000013    // 0x034  nop
-100002b7    // 0x038  lui  x5, 0x10000     x5=RAM 基址
+100002b7    // 0x038  lui  x5, 0x10000      x5=RAM 基址
 0002a303    // 0x03c  lw   x6, 0(x5)
-00100313    // 0x040  addi x6, x0, 1       x6=1
-0062a023    // 0x044  sw   x6, 0(x5)       RAM[base]=1
-0002a383    // 0x048  lw   x7, 0(x5)       x7=1 (load-use 冒险)
+00100313    // 0x040  addi x6, x0, 1        x6=1
+0062a023    // 0x044  sw   x6, 0(x5)        RAM[base]=1
+0002a383    // 0x048  lw   x7, 0(x5)        x7=1 (load-use)
 07f00413    // 0x04c  addi x8, x0, 0x7F
-008280a3    // 0x050  sb   x8, 1(x5)       RAM[base+1]=0x7F  字节写
+008280a3    // 0x050  sb   x8, 1(x5)        RAM 字节写
 00128493    // 0x054  addi x9, x5, 1
-0004c503    // 0x058  lbu  x10, 0(x9)      x10=0x7F          字节读
+0004c503    // 0x058  lbu  x10, 0(x9)       x10=0x7F
 07f00513    // 0x05c  addi x10, x0, 0x7F
-00a51463    // 0x060  bne  x10, x10, +8    -> 0x068 永不跳转
-06f00593    // 0x064  addi x11, x0, 0x6F   占位
-00100593    // 0x068  addi x11, x0, 1      占位
-200005b7    // 0x06c  lui  x11, 0x20000    x11=外设基址
-36300613    // 0x070  addi x12, x0, 867    100MHz/115200-1
-00c5a623    // 0x074  sw   x12, 0x0C(x11)  UART.BAUD=867
-00000013    // 0x078  nop                  等寄存器写入生效
-00000613    // 0x07c  addi x12, x0, 0
-0085a683    // 0x080  lw   x13, 8(x11)     UART.STATUS
-0026f693    // 0x084  andi x13, x13, 2     取 READY 位
-fe068ce3    // 0x088  beq  x13, x0, -8     -> 0x080 轮询
-04f00693    // 0x08c  addi x13, x0, 'O'
-00d5a023    // 0x090  sw   x13, 0(x11)     UART.TXDATA='O'
-04b00693    // 0x094  addi x13, x0, 'K'
-00d5a023    // 0x098  sw   x13, 0(x11)     UART.TXDATA='K'
-00a00693    // 0x09c  addi x13, x0, '\n'
-00d5a023    // 0x0a0  sw   x13, 0(x11)     UART.TXDATA='\n'
-0ff00713    // 0x0a4  addi x14, x0, 0xFF
-00e5a623    // 0x0a8  sw   x14, 0x0C(x11)  GPIO.DIR=0xFF
-05a00713    // 0x0ac  addi x14, x0, 0x5A
-00e5a023    // 0x0b0  sw   x14, 0(x11)     GPIO.DATA=0x5A
-00c5a783    // 0x0b4  lw   x15, 0x0C(x11)  x15=GPIO.DIR=0xFF
-0c800793    // 0x0b8  addi x15, x0, 200    定时器装载值
-00f5a023    // 0x0bc  sw   x15, 0(x11)     TIMER.LOAD=200
-00300713    // 0x0c0  addi x14, x0, 3      EN=1, IRQ_EN=1
-00e5a423    // 0x0c4  sw   x14, 8(x11)     TIMER.CTRL=3 启动
-00c5a703    // 0x0c8  lw   x14, 0x0C(x11)  TIMER.STATUS
-00177713    // 0x0cc  andi x14, x14, 1     取 OVERFLOW
-fe070ce3    // 0x0d0  beq  x14, x0, -8     -> 0x0C8 轮询溢出
-00000713    // 0x0d4  addi x14, x0, 0
-00e5a423    // 0x0d8  sw   x14, 8(x11)     TIMER.CTRL=0 停止
-00100713    // 0x0dc  addi x14, x0, 1
-00e5a623    // 0x0e0  sw   x14, 0x0C(x11)  STATUS 写 1 清 OVERFLOW
-00100313    // 0x0e4  addi x6, x0, 1       通过标志
-00000013    // 0x0e8  nop
-00000013    // 0x0ec  nop
-10000eb7    // 0x0f0  lui  x29, 0x10000    x29=RAM 基址
-300e8e93    // 0x0f4  addi x29, x29, 0x300 x29=0x10000300
-befe8e13    // 0x0f8  addi x28, x29, 0xBEF
-01ce9023    // 0x0fc  sh   x28, 0(x29)     RAM[0x300]=0xBEEF  半字写
-000eaf03    // 0x100  lw   x30, 0(x29)     x30=0xBEEF        整字读回
-000edf83    // 0x104  lhu  x31, 0(x29)     x31=0xBEEF  无符号半字读
-bef00e93    // 0x108  addi x29, x0, -0x411 x29=0xFFFFFBEF (负立即数)
-00000f13    // 0x10c  addi x30, x0, 0      清零，准备用 x31 比较
-01df9463    // 0x110  bne  x31, x29, +8    -> 0x118  0xBEEF != 0xFFFFFBEF
-00000337    // 0x114  lui  x6, 0           不该执行：半字读错则破坏通过标志
-100002b7    // 0x118  lui  x5, 0x10000
-0062a023    // 0x11c  sw   x6, 0(x5)       RESULT=1  ★ tb_top 检测点
-0000006f    // 0x120  jal  x0, 0           PASS 挂死
-00000313    // 0x124  addi x6, x0, 0       失败标志
-100002b7    // 0x128  lui  x5, 0x10000
-0062a023    // 0x12c  sw   x6, 0(x5)       RESULT=0  ★ tb_top 检测点
-0000006f    // 0x130  jal  x0, 0           FAIL 挂死
+00a51463    // 0x060  bne  x10, x10, +8     永不跳转
+06f00593    // 0x064  addi x11, x0, 0x6F    占位
+00100593    // 0x068  addi x11, x0, 1       占位
+200005b7    // 0x06c  lui  x11, 0x20000     x11=0x2000_0000
+40058593    // 0x070  addi x11, x11, 0x400  +0x400
+40058593    // 0x074  addi x11, x11, 0x400  x11=0x2000_0800 UART 基址
+36300613    // 0x078  addi x12, x0, 867     100MHz/115200-1
+00c5a623    // 0x07c  sw   x12, 0x0C(x11)   UART.BAUD=867
+00000613    // 0x080  addi x12, x0, 0
+0085a683    // 0x084  lw   x13, 8(x11)      UART.STATUS
+0016f693    // 0x088  andi x13, x13, 1      取 TX_BUSY
+fe069ce3    // 0x08c  bne  x13, x0, -8      忙则等 -> 0x080
+04f00693    // 0x090  addi x13, x0, 'O'
+00d5a023    // 0x094  sw   x13, 0(x11)      UART.TXDATA='O'
+00000013    // 0x098  nop                   等 tx_busy 置起
+00000013    // 0x09c  nop
+00000013    // 0x0a0  nop
+00000013    // 0x0a4  nop
+0085a683    // 0x0a8  lw   x13, 8(x11)      UART.STATUS
+0016f693    // 0x0ac  andi x13, x13, 1
+fe069ce3    // 0x0b0  bne  x13, x0, -8      忙则等
+04b00693    // 0x0b4  addi x13, x0, 'K'
+00d5a023    // 0x0b8  sw   x13, 0(x11)      UART.TXDATA='K'
+00000013    // 0x0bc  nop                   等 tx_busy 置起
+00000013    // 0x0c0  nop
+00000013    // 0x0c4  nop
+00000013    // 0x0c8  nop
+0085a683    // 0x0cc  lw   x13, 8(x11)      UART.STATUS
+0016f693    // 0x0d0  andi x13, x13, 1
+fe069ce3    // 0x0d4  bne  x13, x0, -8      忙则等
+00a00693    // 0x0d8  addi x13, x0, '\n'
+00d5a023    // 0x0dc  sw   x13, 0(x11)      UART.TXDATA='\n'
+00000013    // 0x0e0  nop
+00000013    // 0x0e4  nop
+40058713    // 0x0e8  addi x14, x11, 0x400  x14=GPIO 基址
+0ff00793    // 0x0ec  addi x15, x0, 0xFF
+00f72223    // 0x0f0  sw   x15, 4(x14)      GPIO.DIR=0xFF
+05a00793    // 0x0f4  addi x15, x0, 0x5A
+00f72023    // 0x0f8  sw   x15, 0(x14)      GPIO.DATA=0x5A
+00072783    // 0x0fc  lw   x15, 0(x14)      x15=读回 DATA
+80058a13    // 0x100  addi x20, x11, -0x800 x20=TIMER 基址
+0c800793    // 0x104  addi x15, x0, 200     定时器装载值
+00fa2023    // 0x108  sw   x15, 0(x20)      TIMER.LOAD=200
+00300a93    // 0x10c  addi x21, x0, 3       EN=1, IRQ_EN=1
+015a2423    // 0x110  sw   x21, 8(x20)      TIMER.CTRL=3 启动
+00ca2a83    // 0x114  lw   x21, 0x0C(x20)   TIMER.STATUS
+001afa93    // 0x118  andi x21, x21, 1      取 OVERFLOW
+fe0a8ce3    // 0x11c  beq  x21, x0, -8      轮询溢出
+00100713    // 0x120  addi x14, x0, 1
+00ea2623    // 0x124  sw   x14, 0x0C(x20)   STATUS 写 1 清 OVERFLOW
+00100313    // 0x128  addi x6, x0, 1        通过标志
+00000013    // 0x12c  nop
+00000013    // 0x130  nop
+10000eb7    // 0x134  lui  x29, 0x10000     x29=RAM 基址
+300e8e93    // 0x138  addi x29, x29, 0x300  x29=0x1000_0300
+0000ce37    // 0x13c  lui  x28, 0xC         x28=0x0000_C000
+eefe0e13    // 0x140  addi x28, x28, -0x111 x28=0x0000_BEEF
+01ce9023    // 0x144  sh   x28, 0(x29)      RAM[0x300]=0xBEEF
+000eaf03    // 0x148  lw   x30, 0(x29)      x30=0xBEEF
+000edf83    // 0x14c  lhu  x31, 0(x29)      x31=0xBEEF
+bef00e93    // 0x150  addi x29, x0, -0x411  x29=0xFFFFFBEF
+00000f13    // 0x154  addi x30, x0, 0
+01df9463    // 0x158  bne  x31, x29, +8     半字读错则落到失败路径
+00000337    // 0x15c  lui  x6, 0            ★ 失败路径：x6=0
+100002b7    // 0x160  lui  x5, 0x10000
+0062a023    // 0x164  sw   x6, 0(x5)        RESULT = 1(通过) / 0(失败)
+0000006f    // 0x168  jal  x0, 0            ★ 挂死点
