@@ -51,6 +51,10 @@ module CPU_top (
     wire             id_branch, id_jump, id_jump_reg;
     wire [2:0]       id_br_sel;
     wire             id_illegal, id_ecall, id_ebreak, id_fence;
+    wire             id_csr_en, id_csr_imm, id_csr_we, id_mret;
+    wire [2:0]       id_csr_op;
+    wire [11:0]      id_csr_addr;
+    wire [4:0]       id_csr_uimm;
 
     // ---- ID2EX ----
     wire [`DATA_BUS] id_ex_pc, id_ex_op1, id_ex_op2, id_ex_rs2_data, id_ex_imm;
@@ -63,6 +67,11 @@ module CPU_top (
     wire             id_ex_branch, id_ex_jump, id_ex_jump_reg;
     wire [2:0]       id_ex_br_sel;
     wire             id_ex_illegal, id_ex_ecall, id_ex_ebreak, id_ex_fence;
+    wire             id_ex_csr_en, id_ex_csr_imm, id_ex_csr_we, id_ex_mret;
+    wire [2:0]       id_ex_csr_op;
+    wire [11:0]      id_ex_csr_addr;
+    wire [4:0]       id_ex_csr_uimm;
+    wire             id_ex_valid;
 
     // ---- EX ----
     wire [`DATA_BUS] ex_alu_op1, ex_alu_op2, ex_alu_result;
@@ -79,14 +88,16 @@ module CPU_top (
     wire             mem_rd_we;
     wire [1:0]       mem_wb_sel_from_ex, mem_size_from_ex;
     wire             mem_read_from_ex, mem_write_from_ex, mem_unsigned_from_ex;
+    wire             mem_csr_we;
+    wire [11:0]      mem_csr_addr;
+    wire [31:0]      mem_csr_wdata, mem_csr_rdata;
 
     // ---- MEM ----
-    wire             mem_align_err;      // 对齐检查（MEM_load 输出）
     wire [`DATA_BUS] mem_rdata_ext_c;    // MEM 级组合提取出的 load 数据
     // 访存地址/数据/字节使能由 EX 级的 MEM_req 产生，见下方第 5 节
 
     // ---- MEM2WB ----
-    wire [`DATA_BUS] wb_alu_result, wb_rdata, wb_pc4, wb_wdata;
+    wire [`DATA_BUS] wb_alu_result, wb_rdata, wb_pc4, wb_wdata, wb_csr_rdata;
     wire [`ADDR_BUS] wb_rd_addr;
     wire             wb_rd_we;
     wire [1:0]       wb_sel;
@@ -94,14 +105,26 @@ module CPU_top (
     // ---- Control ----
     wire        flush_if2id, flush_id2ex, flush_ex2mem, flush_mem2wb;
     wire        stall_pc, stall_if2id, stall_id2ex;
-    wire        redirect_en, exception_en;
-    wire [`DATA_BUS] redirect_pc;
+    wire        redirect_en, exception_en, trap_en;
+    wire        mret_en;
+    wire [`DATA_BUS] redirect_pc, trap_cause, trap_pc;
 
     // ---- PC 重定向 ----
     // 说明：PC 的跳转/停顿实际由 PCReg 的 jmp_flag / stall 端口完成
     //       （见下方 u_PCReg 例化），此处不再保留冗余的 pc_load 逻辑。
 
-    // ---- 取指侧与 ROM 1 拍读延迟的配合（重要）----
+    // ---- CSR / 陷阱 ----
+    wire [31:0] csr_rdata, csr_src;
+    logic [31:0] csr_new;
+    wire        csr_valid, csr_writable, csr_wr;
+    wire        ex_load_misaligned, ex_store_misaligned, ex_csr_illegal;
+    wire        irq_pending, interrupt_req;
+    wire [31:0] mtvec, mepc_csr, mcause_csr, mstatus_csr, mie_csr;
+    wire [15:0] _unused_csr_dbg;
+
+    assign mret_en = id_ex_mret & id_ex_valid;
+
+    // 取指侧与 ROM 1 拍读延迟的配合（重要）
     //
     //  ROM 是寄存输出：T 拍给出地址 A(T)，T+1 拍 douta = I(A(T))。
     //  IF2ID 在 T+1 拍沿锁存到的是「T-1 拍给出的地址」对应的指令，所以：
@@ -226,7 +249,14 @@ module CPU_top (
         .illegal      (id_illegal),
         .ecall        (id_ecall),
         .ebreak       (id_ebreak),
-        .fence        (id_fence)
+        .fence        (id_fence),
+        .csr_en       (id_csr_en),
+        .csr_op       (id_csr_op),
+        .csr_addr     (id_csr_addr),
+        .csr_imm      (id_csr_imm),
+        .csr_uimm     (id_csr_uimm),
+        .csr_we       (id_csr_we),
+        .mret         (id_mret)
     );
 
     Regs u_Regs (
@@ -282,6 +312,13 @@ module CPU_top (
         .id_ecall        (id_ecall),
         .id_ebreak       (id_ebreak),
         .id_fence        (id_fence),
+        .id_csr_en       (id_csr_en),
+        .id_csr_op       (id_csr_op),
+        .id_csr_addr     (id_csr_addr),
+        .id_csr_imm      (id_csr_imm),
+        .id_csr_uimm     (id_csr_uimm),
+        .id_csr_we       (id_csr_we),
+        .id_mret         (id_mret),
 
         .id_ex_pc           (id_ex_pc),
         .id_ex_rs1_addr     (id_ex_rs1_addr),
@@ -307,7 +344,15 @@ module CPU_top (
         .id_ex_illegal      (id_ex_illegal),
         .id_ex_ecall        (id_ex_ecall),
         .id_ex_ebreak       (id_ex_ebreak),
-        .id_ex_fence        (id_ex_fence)
+        .id_ex_fence        (id_ex_fence),
+        .id_ex_csr_en       (id_ex_csr_en),
+        .id_ex_csr_op       (id_ex_csr_op),
+        .id_ex_csr_addr     (id_ex_csr_addr),
+        .id_ex_csr_imm      (id_ex_csr_imm),
+        .id_ex_csr_uimm     (id_ex_csr_uimm),
+        .id_ex_csr_we       (id_ex_csr_we),
+        .id_ex_mret         (id_ex_mret),
+        .id_ex_valid        (id_ex_valid)
     );
 
     //==================================================================
@@ -333,6 +378,8 @@ module CPU_top (
         .ex_mem_rd_we     (mem_rd_we),
         .ex_mem_mem_read  (mem_read_from_ex),    // MEM 级是否为 load
         .ex_mem_load_data (mem_rdata_ext_c),     // load 数据（MEM 级组合提取）
+        .ex_mem_is_csr    (mem_wb_sel_from_ex == `WB_CSR),  // MEM 级是否为 CSR 指令
+        .ex_mem_csr_data  (mem_csr_rdata),       // CSR 指令读出的旧值
 
         // MEM/WB 前递源
         .mem_wb_rd_addr   (wb_rd_addr),
@@ -395,6 +442,10 @@ module CPU_top (
         .ex_mem_read     (id_ex_mem_read),
         .ex_mem_write    (id_ex_mem_write),
         .ex_mem_unsigned (id_ex_mem_unsigned),
+        .ex_csr_we       (csr_wr),
+        .ex_csr_addr     (id_ex_csr_addr),
+        .ex_csr_wdata    (csr_new),
+        .ex_csr_rdata    (csr_rdata),
 
         .mem_alu_result  (mem_alu_result),
         .mem_rs2_data    (mem_rs2_data),
@@ -406,7 +457,11 @@ module CPU_top (
         .mem_size        (mem_size_from_ex),
         .mem_read        (mem_read_from_ex),
         .mem_write       (mem_write_from_ex),
-        .mem_unsigned    (mem_unsigned_from_ex)
+        .mem_unsigned    (mem_unsigned_from_ex),
+        .mem_csr_we      (mem_csr_we),
+        .mem_csr_addr    (mem_csr_addr),
+        .mem_csr_wdata   (mem_csr_wdata),
+        .mem_csr_rdata   (mem_csr_rdata)
     );
 
     //==================================================================
@@ -433,11 +488,9 @@ module CPU_top (
         .mem_alu_result (mem_alu_result),
         .mem_size       (mem_size_from_ex),
         .mem_read       (mem_read_from_ex),
-        .mem_write      (mem_write_from_ex),
         .mem_unsigned   (mem_unsigned_from_ex),
         .mem_rdata      (ram_data_i),        // 1 拍前给出的地址的数据
-        .mem_rdata_ext  (mem_rdata_ext_c),
-        .mem_align_err  (mem_align_err)
+        .mem_rdata_ext  (mem_rdata_ext_c)
     );
 
     // ---- EX 级：访存请求（地址 / 写数据 / 字节使能）----
@@ -445,7 +498,7 @@ module CPU_top (
     //   地址提前一拍，BRAM 的读延迟才落在 MEM 级。
     logic [`DATA_BUS] ex_mem_addr, ex_mem_wdata;
     logic [      3:0] ex_mem_be;
-    logic             ex_mem_req, ex_mem_we;
+    logic             ex_mem_req, ex_mem_we, ex_mem_align_err;
 
     MEM_req u_MEM_req (
         .mem_alu_result (ex_alu_result),     // EX 级 ALU 结果 = 访存地址
@@ -458,7 +511,67 @@ module CPU_top (
         .mem_wdata      (ex_mem_wdata),
         .mem_be         (ex_mem_be),
         .mem_req        (ex_mem_req),
-        .mem_we         (ex_mem_we)
+        .mem_we         (ex_mem_we),
+        .mem_align_err  (ex_mem_align_err)
+    );
+
+    //------------------------------------------------------------------
+    // CSR：EX 级组合读 + 展开成最终新值，MEM 级提交（见 CSR.sv 说明）
+    //   · 非立即数形式的源操作数走前递后的 rs1（ex_br_op1 就是 rs1_fwd）
+    //   · 立即数形式用 rs1 字段零扩展成 5 bit 无符号数
+    //------------------------------------------------------------------
+    assign csr_src = id_ex_csr_imm ? {27'b0, id_ex_csr_uimm} : ex_br_op1;
+
+    always_comb begin
+        case (id_ex_csr_op)
+            `CSR_OP_RW, `CSR_OP_RWI: csr_new = csr_src;
+            `CSR_OP_RS, `CSR_OP_RSI: csr_new = csr_rdata |  csr_src;
+            default:                 csr_new = csr_rdata & ~csr_src;   // RC / RCI
+        endcase
+    end
+
+    assign csr_wr = id_ex_csr_we & id_ex_valid;
+
+    // 非法 CSR 访问：地址未实现，或写只读寄存器（在 EX 级判定 → mcause = 2）
+    assign ex_csr_illegal = id_ex_csr_en & id_ex_valid &
+                            (~csr_valid | (csr_wr & ~csr_writable));
+
+    // 地址非对齐（MEM_req 在 EX 级拦下并门控访存请求）
+    assign ex_load_misaligned  = id_ex_mem_read  & ex_mem_align_err;
+    assign ex_store_misaligned = id_ex_mem_write & ex_mem_align_err;
+
+    // 中断受理条件：EX 级是真实指令、且不是访存指令
+    //   （访存请求已在 EX 级发出，打断它会让「指令部分执行」；推迟一拍即可）
+    assign interrupt_req = irq_pending & id_ex_valid &
+                           ~(id_ex_mem_read | id_ex_mem_write);
+
+    CSR u_CSR (
+        .clk_sys      (clk_sys),
+        .rst_sys      (rst_sys),
+
+        .csr_addr     (id_ex_csr_addr),
+        .csr_rdata    (csr_rdata),
+        .csr_valid    (csr_valid),
+        .csr_writable (csr_writable),
+
+        .csr_we       (mem_csr_we),
+        .csr_addr_w   (mem_csr_addr),
+        .csr_wdata    (mem_csr_wdata),
+
+        .trap_en      (trap_en),
+        .trap_cause   (trap_cause),
+        .trap_pc      (trap_pc),
+        .mret_en      (mret_en),
+        .trap_vector  (mtvec),
+
+        .int_i        (int_i),
+        .mip_mtip     (),
+        .irq_pending  (irq_pending),
+
+        .mstatus_o    (mstatus_csr),
+        .mepc_o       (mepc_csr),
+        .mcause_o     (mcause_csr),
+        .mie_o        (mie_csr)
     );
 
     // 写请求只占 EX 一拍（在本拍沿落盘），读请求同样只占一拍，
@@ -481,13 +594,15 @@ module CPU_top (
         .mem_rd_addr    (mem_rd_addr),
         .mem_rd_we      (mem_rd_we),
         .mem_wb_sel     (mem_wb_sel_from_ex),
+        .mem_csr_rdata  (mem_csr_rdata),
 
         .wb_alu_result  (wb_alu_result),
         .wb_rdata       (wb_rdata),
         .wb_pc4         (wb_pc4),
         .wb_rd_addr     (wb_rd_addr),
         .wb_rd_we       (wb_rd_we),
-        .wb_sel         (wb_sel)
+        .wb_sel         (wb_sel),
+        .wb_csr_rdata   (wb_csr_rdata)
     );
 
     //==================================================================
@@ -497,6 +612,7 @@ module CPU_top (
         .wb_alu_result (wb_alu_result),
         .wb_rdata      (wb_rdata),
         .wb_pc4        (wb_pc4),
+        .wb_csr_rdata  (wb_csr_rdata),
         .wb_sel        (wb_sel),
         .wb_rd_addr    (wb_rd_addr),
         .wb_rd_we      (wb_rd_we),
@@ -512,6 +628,7 @@ module CPU_top (
         .clk_sys          (clk_sys),
         .rst_sys          (rst_sys),
 
+        .ex_pc            (id_ex_pc),
         .ex_branch_taken  (ex_branch_taken),
         .ex_jump_taken    (ex_jump_taken),
         .ex_branch_target (ex_branch_target),
@@ -519,6 +636,13 @@ module CPU_top (
         .ex_illegal       (id_ex_illegal),
         .ex_ecall         (id_ex_ecall),
         .ex_ebreak        (id_ex_ebreak),
+        .ex_load_misaligned  (ex_load_misaligned),
+        .ex_store_misaligned (ex_store_misaligned),
+        .ex_csr_illegal      (ex_csr_illegal),
+        .interrupt_req    (interrupt_req),
+        .mtvec            (mtvec),
+        .mret_en          (mret_en),
+        .mepc             (mepc_csr),
 
         .id_ex_rd_addr    (id_ex_rd_addr),
         .id_ex_rd_we      (id_ex_rd_we),
@@ -539,7 +663,10 @@ module CPU_top (
 
         .redirect_en      (redirect_en),
         .redirect_pc      (redirect_pc),
-        .exception_en     (exception_en)
+        .exception_en     (exception_en),
+        .trap_en          (trap_en),
+        .trap_cause       (trap_cause),
+        .trap_pc          (trap_pc)
     );
 
 endmodule

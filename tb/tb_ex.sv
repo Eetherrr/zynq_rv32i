@@ -15,6 +15,8 @@ module tb_ex;
     logic [`ADDR_BUS] ex_mem_rd_addr, mem_wb_rd_addr;
     logic [`DATA_BUS] ex_mem_alu_result, ex_mem_load_data, mem_wb_wdata;
     logic             ex_mem_rd_we, ex_mem_mem_read, mem_wb_rd_we;
+    logic             ex_mem_is_csr;
+    logic [`DATA_BUS] ex_mem_csr_data;
     logic [`DATA_BUS] alu_op1, alu_op2, br_op1, br_op2, jump_rs1;
 
     EX u_dut (
@@ -25,11 +27,14 @@ module tb_ex;
         .ex_mem_rd_addr(ex_mem_rd_addr), .ex_mem_alu_result(ex_mem_alu_result),
         .ex_mem_rd_we(ex_mem_rd_we), .ex_mem_mem_read(ex_mem_mem_read),
         .ex_mem_load_data(ex_mem_load_data),
+        .ex_mem_is_csr(ex_mem_is_csr), .ex_mem_csr_data(ex_mem_csr_data),
         .mem_wb_rd_addr(mem_wb_rd_addr), .mem_wb_wdata(mem_wb_wdata),
         .mem_wb_rd_we(mem_wb_rd_we),
         .alu_op1(alu_op1), .alu_op2(alu_op2), .br_op1(br_op1), .br_op2(br_op2),
         .jump_rs1(jump_rs1)
     );
+
+    initial begin ex_mem_is_csr = 1'b0; ex_mem_csr_data = 32'b0; end
 
     int errors = 0, checks = 0;
     task automatic ck32(input string n, input logic [31:0] g, input logic [31:0] e);
@@ -119,6 +124,14 @@ module tb_ex;
         set(5,5, 32'h0000_1000, 32'h0000_00FF, `OP1_PC, `OP2_IMM); #1;
         ck32("op1_sel=PC 不前递", alu_op1, 32'h0000_1000);
         ck32("op2_sel=IMM 不前递", alu_op2, 32'h0000_00FF);
+
+        $display("\n-- EX/MEM 是 CSR 指令：前递 CSR 读出的旧值 --");
+        exmem(0,0,0,0); memwb(0,0,0);
+        ex_mem_csr_data = 32'hCA5A_0007; ex_mem_is_csr = 1'b1;
+        exmem(5, 32'hDEAD_BEEF, 1'b1, 1'b0);   // 同一条指令：rd=5，但它是 CSR
+        set(5,5, 32'hA1, 32'hB2, `OP1_RS1, `OP2_RS2); #1;
+        ck32("CSR 前递旧值（非 ALU 结果）", alu_op1, 32'hCA5A_0007);
+        ex_mem_is_csr = 1'b0; #1;
 
         $display("\n-- store 数据：必须取寄存器堆原始 rs2 --");
         // S 型 op2_sel = OP2_IMM（那是地址偏移量），store 数据不能用 op2

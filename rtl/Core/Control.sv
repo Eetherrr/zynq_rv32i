@@ -27,11 +27,19 @@ module Control (
     // 来自 EX 阶段
     input  wire              ex_branch_taken,
     input  wire              ex_jump_taken,
+    input  wire [`DATA_BUS]  ex_pc,                 // EX 级指令 PC（陷阱记录 mepc）
     input  wire [`DATA_BUS]  ex_branch_target,
     input  wire [`DATA_BUS]  ex_jump_target,
     input  wire              ex_illegal,
     input  wire              ex_ecall,
     input  wire              ex_ebreak,
+    input  wire              ex_load_misaligned,    // load 地址非对齐
+    input  wire              ex_store_misaligned,   // store 地址非对齐
+    input  wire              ex_csr_illegal,        // CSR 地址非法 / 写只读 CSR
+    input  wire              interrupt_req,         // mip.MTIP & mie.MTIE & mstatus.MIE
+    input  wire [`DATA_BUS]  mtvec,                 // 陷阱向量
+    input  wire              mret_en,               // MRET（返回 mepc）
+    input  wire [`DATA_BUS]  mepc,
 
     // EX 阶段当前指令 (来自 ID2EX) —— 保留给将来实现异常 / 中断
     input  wire [`ADDR_BUS]  id_ex_rd_addr,
@@ -55,18 +63,48 @@ module Control (
     // 重定向
     output logic             redirect_en,
     output logic [`DATA_BUS] redirect_pc,
-    output logic             exception_en
+    output logic             exception_en,
+    output logic             trap_en,          // 本拍进入陷阱（异常或中断）
+    output logic [`DATA_BUS] trap_cause,
+    output logic [`DATA_BUS] trap_pc
 );
 
-    logic redirect, exception;
+    logic redirect, exception, trap;
 
     assign redirect  = ex_branch_taken | ex_jump_taken;
-    assign exception = ex_illegal | ex_ecall | ex_ebreak;
+    assign exception = ex_illegal | ex_ecall | ex_ebreak |
+                       ex_load_misaligned | ex_store_misaligned | ex_csr_illegal;
 
-    // flush: 全部下游流水寄存器清 NOP
-    assign flush_if2id  = redirect | exception;
-    assign flush_id2ex  = redirect | exception;
-    assign flush_ex2mem = redirect | exception;
+    // 中断只在没有同步异常时受理（同一指令上异常优先）
+    assign trap      = exception | (interrupt_req & ~exception);
+
+    //---- 陷阱 cause（mcause）----
+    always_comb begin
+        if      (ex_illegal || ex_csr_illegal) trap_cause = `CAUSE_ILLEGAL_INSTR;
+        else if (ex_ebreak)                    trap_cause = `CAUSE_BREAKPOINT;
+        else if (ex_ecall)                     trap_cause = `CAUSE_ECALL_M;
+        else if (ex_load_misaligned)           trap_cause = `CAUSE_LOAD_MISALIGN;
+        else if (ex_store_misaligned)          trap_cause = `CAUSE_STORE_MISALIGN;
+        else if (interrupt_req)                trap_cause = `CAUSE_IRQ_M_TIMER;
+        else                                   trap_cause = 32'b0;
+    end
+
+    // mepc：同步异常 = 出错指令 PC；中断 = 被打断指令 PC（由 CSR 模块记录）
+    assign trap_pc = ex_pc;
+
+    // flush:
+    //   · 重定向只冲刷「更年轻」的 IF/ID 与 ID/EX —— **不能冲刷 EX2MEM**：
+    //     JAL / JALR 正是产生重定向的那条指令，而它还要把返回地址
+    //     （PC+4，wb_sel = WB_PC4）经 EX2MEM → MEM2WB 写回 rd。
+    //     若连 EX2MEM 一起清空，`jal ra, func` / `jalr ra, 0(rs1)` 这类
+    //     函数调用的返回地址就永远写不进寄存器（分支不写回，所以以前没暴露）。
+    //   · 异常才需要把 EX2MEM 也清掉：出错指令不允许写回
+    //     （illegal / ecall / ebreak 的 rd_we 本来就是 0）。
+    assign flush_if2id  = redirect | trap;
+    assign flush_id2ex  = redirect | trap;
+    //   · 分支/跳转重定向不清 EX2MEM（JAL/JALR 链接值要写回）
+    //   · 陷阱清 EX2MEM：出错/被打断的指令不写回
+    assign flush_ex2mem = trap;
     assign flush_mem2wb = 1'b0;   // WB 阶段无需 flush
 
     // stall: 当前微架构无数据冒险停顿（见文件头说明）
@@ -74,10 +112,15 @@ module Control (
     assign stall_if2id  = 1'b0;
     assign stall_id2ex  = 1'b0;
 
-    // 重定向
-    assign redirect_en  = redirect;
-    assign redirect_pc  = ex_branch_taken ? ex_branch_target
-                                          : ex_jump_target;
+    // 重定向优先级：陷阱 > MRET > 分支 > 跳转
+    assign redirect_en  = trap | mret_en | redirect;
+    always_comb begin
+        if      (trap)              redirect_pc = mtvec;
+        else if (mret_en)           redirect_pc = mepc;
+        else if (ex_branch_taken)   redirect_pc = ex_branch_target;
+        else                        redirect_pc = ex_jump_target;
+    end
     assign exception_en = exception;
+    assign trap_en      = trap;
 
 endmodule

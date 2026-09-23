@@ -160,7 +160,7 @@ module tb_cpu;
                      $time, ram_addr, ram_we, ram_re, ram_data_o, u_ram.mem[0]);
     end
 
-    int i;
+    int i, jal_idx, jalr_idx;
     initial begin
         // 导出 VCD 供波形分析（路径相对仿真运行目录 sim/unit）
         $dumpfile("cpu_wave.vcd");
@@ -251,8 +251,19 @@ module tb_cpu;
         emit(I(3, 0, 3'b000, 28, ADDI));       // 0x10c addi x28, x0, 3
         emit(B(-12, 28, 26, 3'b001));          // 0x110 bne x26,x28,-12 → 0x104
         emit(S(44, 19, 20, 3'b010));           // 0x114 sw   x19, 44(x20)  mem[11]=3
+        //=== JAL / JALR 带链接：返回地址必须写回 rd ===
+        emit(I(0, 0, 3'b000, 23, ADDI));       // 清除毒药寄存器 x23
+        jal_idx = n_insn;
+        emit(J(8, 22));                        // jal  x22, +8        x22 = jal_idx*4+4
+        emit(I(99, 0, 3'b000, 23, ADDI));      // 跳过（跳转失败会写 x23=99）
+        jalr_idx = n_insn;
+        emit(I(n_insn*4 + 16, 0, 3'b000, 19, ADDI)); // addi x19, x0, <jalr 之后第 3 条>
+        emit(I(0, 19, 3'b000, 26, JALR));      // jalr x26, 0(x19)    x26 = jalr_idx*4+8
+        emit(I(99, 0, 3'b000, 23, ADDI));      // 跳过
+        emit(I(99, 0, 3'b000, 23, ADDI));      // 跳过
+        emit(I(77, 0, 3'b000, 28, ADDI));      // 落点：x28 = 77
         //=== 结束 ===
-        emit(I(48, 20, 3'b000, 21, ADDI));     // 0x118 addi x21, x20, 48 = mem[12]
+        emit(I(48, 20, 3'b000, 21, ADDI));     // addi x21, x20, 48 = mem[12]
         emit(S(0, 30, 21, 3'b010));            // 0x11c sw   x30, 0(x21)   mem[12]=7 完成标志
         emit(J(0, 0));                         // 0x120 挂死
 
@@ -307,6 +318,10 @@ module tb_cpu;
         ck32("x29 分支未误跳",   X(29), 32'd5);
         ck32("x30 beq/bne",      X(30), 32'd7);
         ck32("x31 jal",          X(31), 32'd2);
+        ck32("x22 jal 链接值 pc+4", X(22), jal_idx*4 + 4);
+        ck32("x26 jalr 链接值 pc+4", X(26), jalr_idx*4 + 8);
+        ck32("x28 jalr 落点",     X(28), 32'd77);
+        ck32("x23 跳转未失败",    X(23), 32'd0);
 
         $display("\n-- 存储器检查（访存数据通路）--");
         ck32("mem[0] sw 0x123 + sh 0x7F@2", u_ram.mem[0], 'h007F_0123);

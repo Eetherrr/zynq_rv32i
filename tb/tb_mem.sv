@@ -17,19 +17,21 @@ module tb_mem;
 
     // ---- MEM_load ----
     logic [`DATA_BUS] mem_rdata, mem_rdata_ext;
-    logic             mem_unsigned, mem_align_err;
+    logic             mem_unsigned;
+    // ---- 对齐检查（在 MEM_req 里，EX 级发起访存之前）----
+    logic             mem_align_err;
 
     MEM_req u_req (
         .mem_alu_result(mem_alu_result), .mem_rs2_data(mem_rs2_data),
         .mem_size(mem_size), .mem_read(mem_read), .mem_write(mem_write),
         .mem_addr(mem_addr), .mem_wdata(mem_wdata), .mem_be(mem_be),
-        .mem_req(mem_req), .mem_we(mem_we));
+        .mem_req(mem_req), .mem_we(mem_we), .mem_align_err(mem_align_err));
 
     MEM_load u_load (
         .mem_alu_result(mem_alu_result), .mem_size(mem_size),
-        .mem_read(mem_read), .mem_write(mem_write),
+        .mem_read(mem_read),
         .mem_unsigned(mem_unsigned), .mem_rdata(mem_rdata),
-        .mem_rdata_ext(mem_rdata_ext), .mem_align_err(mem_align_err));
+        .mem_rdata_ext(mem_rdata_ext));
 
     int errors = 0, checks = 0;
     task automatic ck32(input string n, input logic [31:0] g, input logic [31:0] e);
@@ -53,7 +55,7 @@ module tb_mem;
         mem_read=0; mem_write=1; #1; ck1("写: req=1 we=1", mem_req, 1'b1); ck1("写: we=1", mem_we, 1'b1);
         mem_read=0; mem_write=0; #1; ck1("空闲: req=0", mem_req, 1'b0);
 
-        $display("\n-- MEM_load: 地址对齐检查 --");
+        $display("\n-- MEM_req: 地址对齐检查（EX 级，发起前拦截） --");
         mem_read=1; mem_write=0;
         mem_size=`MSZ_B; mem_alu_result=32'h1001; #1; ck1("字节 任意地址 无对齐错", mem_align_err, 1'b0);
         mem_size=`MSZ_H; mem_alu_result=32'h1000; #1; ck1("半字 偶地址 ok", mem_align_err, 1'b0);
@@ -64,6 +66,13 @@ module tb_mem;
         // 非访存指令不报对齐错
         mem_read=0; mem_write=0; mem_size=`MSZ_W; mem_alu_result=32'h1001; #1;
         ck1("非访存不报对齐错", mem_align_err, 1'b0);
+        // 非对齐时不得发起访存（否则非对齐 store 会先写坏内存再报异常）
+        mem_read=1; mem_size=`MSZ_W; mem_alu_result=32'h1001; #1;
+        ck1("非对齐 load: req 被门控", mem_req, 1'b0);
+        mem_read=0; mem_write=1; mem_size=`MSZ_H; mem_alu_result=32'h1001; #1;
+        ck1("非对齐 store: req 被门控", mem_req, 1'b0);
+        ck1("非对齐 store: we 被门控", mem_we, 1'b0);
+        mem_write=0;
 
         $display("\n-- MEM_req: 字节使能（写） --");
         mem_write=1; mem_read=0;

@@ -26,6 +26,11 @@ module EX2MEM (
     input  logic             ex_mem_read,
     input  logic             ex_mem_write,
     input  logic             ex_mem_unsigned,
+    // CSR：EX 级算好的「最终新值」，到 MEM 级才提交（保证陷阱精确）
+    input  logic             ex_csr_we,
+    input  logic [     11:0] ex_csr_addr,
+    input  logic [`DATA_BUS] ex_csr_wdata,
+    input  logic [`DATA_BUS] ex_csr_rdata,
 
     // ---------- 输出到 MEM 阶段 ----------
     output logic [`DATA_BUS] mem_alu_result,
@@ -38,7 +43,11 @@ module EX2MEM (
     output logic [      1:0] mem_size,
     output logic             mem_read,
     output logic             mem_write,
-    output logic             mem_unsigned
+    output logic             mem_unsigned,
+    output logic             mem_csr_we,
+    output logic [     11:0] mem_csr_addr,
+    output logic [`DATA_BUS] mem_csr_wdata,
+    output logic [`DATA_BUS] mem_csr_rdata
 );
 
     always @(posedge clk_sys or negedge rst_sys) begin
@@ -55,6 +64,10 @@ module EX2MEM (
             mem_read       <= `DISABLE;
             mem_write      <= `DISABLE;
             mem_unsigned   <= `FALSE;
+            mem_csr_we     <= `DISABLE;
+            mem_csr_addr   <= 12'b0;
+            mem_csr_wdata  <= 32'b0;
+            mem_csr_rdata  <= 32'b0;
         end
         else if (flush) begin
             // ---------------- 清空为 NOP ----------------
@@ -69,6 +82,10 @@ module EX2MEM (
             mem_read       <= `DISABLE;
             mem_write      <= `DISABLE;
             mem_unsigned   <= `FALSE;
+            mem_csr_we     <= `DISABLE;
+            mem_csr_addr   <= 12'b0;
+            mem_csr_wdata  <= 32'b0;
+            mem_csr_rdata  <= 32'b0;
         end
         else if (!stall) begin
             // ---------------- 正常流水 ----------------
@@ -83,6 +100,10 @@ module EX2MEM (
             mem_read       <= ex_mem_read;
             mem_write      <= ex_mem_write;
             mem_unsigned   <= ex_mem_unsigned;
+            mem_csr_we     <= ex_csr_we;
+            mem_csr_addr   <= ex_csr_addr;
+            mem_csr_wdata  <= ex_csr_wdata;
+            mem_csr_rdata  <= ex_csr_rdata;
         end
         // else : stall，保持当前值不变
     end

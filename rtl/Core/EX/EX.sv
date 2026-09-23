@@ -17,6 +17,8 @@ module EX (
     input  logic             ex_mem_rd_we,
     input  logic             ex_mem_mem_read,   // 1 = EX/MEM 级是 load
     input  logic [`DATA_BUS] ex_mem_load_data,  // EX/MEM 是 load 时的已提取数据
+    input  logic             ex_mem_is_csr,     // 1 = EX/MEM 级是 CSR 指令
+    input  logic [`DATA_BUS] ex_mem_csr_data,   // EX/MEM 是 CSR 指令时读出的旧值
 
     // 前递源 2: MEM/WB
     input  logic [`ADDR_BUS] mem_wb_rd_addr,
@@ -42,8 +44,12 @@ module EX (
     //   若 EX/MEM 不是 load，前递源仍是 ALU 结果。
     logic [`DATA_BUS] ex_mem_fwd_data;
 
-    assign ex_mem_fwd_data = ex_mem_mem_read ? ex_mem_load_data
-                                             : ex_mem_alu_result;
+    //   · load：前递 MEM 级组合提取出的数据
+    //   · CSR ：前递 CSR 读出的旧值（rd 写的就是它，而 alu_result 是垃圾）
+    //   · 其它：前递 ALU 结果
+    assign ex_mem_fwd_data = ex_mem_is_csr   ? ex_mem_csr_data
+                           : ex_mem_mem_read ? ex_mem_load_data
+                           :                   ex_mem_alu_result;
 
     assign hit_ex_mem_rs1 = ex_mem_rd_we
                          && (ex_mem_rd_addr != `REG_ZERO)

@@ -24,6 +24,7 @@ module MEM2WB (
     input  wire [`ADDR_BUS]  mem_rd_addr,
     input  wire              mem_rd_we,
     input  wire [      1:0]  mem_wb_sel,
+    input  wire [`DATA_BUS]  mem_csr_rdata,     // CSR 旧值（WB_CSR 写回源）
 
     // ---------- 输出到 WB ----------
     output logic [`DATA_BUS] wb_alu_result,
@@ -31,7 +32,8 @@ module MEM2WB (
     output logic [`DATA_BUS] wb_pc4,
     output logic [`ADDR_BUS] wb_rd_addr,
     output logic             wb_rd_we,
-    output logic [      1:0] wb_sel
+    output logic [      1:0] wb_sel,
+    output logic [`DATA_BUS] wb_csr_rdata
 );
 
     always @(posedge clk_sys or negedge rst_sys) begin
@@ -43,6 +45,7 @@ module MEM2WB (
             wb_rd_addr    <= 5'b0;
             wb_rd_we      <= `DISABLE;
             wb_sel        <= `WB_ALU;
+            wb_csr_rdata  <= 32'b0;
         end
         else if (flush) begin
             // ---------------- 清空为 NOP ----------------
@@ -52,6 +55,7 @@ module MEM2WB (
             wb_rd_addr    <= 5'b0;
             wb_rd_we      <= `DISABLE;
             wb_sel        <= `WB_ALU;
+            wb_csr_rdata  <= 32'b0;
         end
         else if (!stall) begin
             // ---------------- 正常流水 ----------------
@@ -61,6 +65,7 @@ module MEM2WB (
             wb_rd_addr    <= mem_rd_addr;
             wb_rd_we      <= mem_rd_we;
             wb_sel        <= mem_wb_sel;
+            wb_csr_rdata  <= mem_csr_rdata;
         end
     end
 

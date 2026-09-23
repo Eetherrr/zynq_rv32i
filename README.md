@@ -36,7 +36,7 @@ CPU 本体采用经典**五级流水线**（IF / ID / EX / MEM / WB），通过�
 | 外设 | TIMER / SPI / UART / GPIO（各为独立模块） |
 | 目标器件 | `xc7z010clg400-1`（Zynq-7010，CLG400 封装） |
 | 顶层模块 | `CPU_SOC_top` |
-| 验证状态 | 模块级 9 个测试平台 **333 项** + RIB/外设 **25 项** + SoC 顶层 **26 项**，全部通过（见 [5.6](#56-验证方式) / [7](#7-当前进度)） |
+| 验证状态 | 模块级 10 个测试平台 **420 项** + RIB/外设 **25 项** 全部通过；**SoC 系统级 RV32I 全覆盖 118 项中 105 项通过**（异常记录簿记待收尾，见 [7](#7-当前进度)） |
 | 开发工具 | Vivado 2022.2 + Makefile + Tcl 脚本 |
 
 ---
@@ -87,10 +87,11 @@ zynq_rv32i/
 │   └── sim.tcl               #   工程模式仿真（批处理出 VCD 或 GUI 看波形）
 ├── sim/                      # 仿真输出（waveform.vcd、unit/ 单元测试运行目录）
 ├── tb/                       # 测试平台
-│   ├── prog/                 #   测试程序镜像
-│   │   ├── gen_cpu_test.py   #     ★ 汇编生成器：hex + coe + ROM.mif
-│   │   ├── cpu_test.hex      #     机器码清单（含注释，只读参考）
+│   ├── prog/                 #   测试程序镜像（RV32I 全覆盖，全部由脚本生成）
+│   │   ├── gen_cpu_test.py   #     ★ 汇编器 + RV32I 参考模型 + 覆盖率自检
+│   │   ├── cpu_test.hex      #     机器码清单（含注释与覆盖率报告，只读参考）
 │   │   ├── cpu_test.coe      #     ROM IP 初始化文件（生成物）
+│   │   ├── cpu_test.exp      #     结果槽期望值 + 名称（生成物，tb_top 读它比对）
 │   │   └── ROM.mif           #     仿真用 ROM 初始化文件（生成物，run_tb.tcl 会覆盖 IP 的同名文件）
 │   ├── tb_decoder.sv         #   ★ 译码器全指令集
 │   ├── tb_alu.sv             #   ★ ALU 全运算
@@ -513,19 +514,20 @@ vivado -nolog -nojournal -mode batch -source scripts/run_unit.tcl \
 **完全绕开 ROM/RAM 的 Block Memory Generator IP**，无需任何 IP 库即可运行。
 这是排查 CPU 本体问题时最快的手段。
 
-现有 9 个测试平台，共 **333 项检查，全部通过**：
+现有 10 个测试平台，共 **420 项检查，全部通过**：
 
 | 测试平台 | 覆盖内容 | 项数 |
 | --- | --- | :-: |
-| `tb_decoder` | **全指令集译码**：R/I/S/B/U/J 型、系统指令、各类非法编码 | 116 |
+| `tb_decoder` | **全指令集译码**：R/I/S/B/U/J 型、系统指令、各类非法编码、**Zicsr 六条 + MRET** | 141 |
 | `tb_alu` | 十种运算 + 溢出回绕 + 移位量掩码 + 有/无符号边界 | 34 |
 | `tb_branch` | 六种分支条件 + 有符号 vs 无符号边界 + 目标地址回绕 | 27 |
 | `tb_jump` | JAL/JALR 目标计算、`&~1` 对齐、"与 PC 无关"特性 | 14 |
 | `tb_regs` | x0 硬连线、写使能门控、同拍写穿透、复位 | 11 |
-| `tb_ex` | 前递优先级（EX/MEM > MEM/WB）、**load 前递数据而非地址**、store 数据取原始 rs2、x0/rd_we 屏蔽 | 22 |
-| `tb_mem` | `MEM_req` 的请求/字节使能/store 通道搬移 + `MEM_load` 的对齐检查/通道提取/符号扩展 | 38 |
-| `tb_control` | 冲刷、重定向、异常、优先级；**load-use 不停顿**（改由前递解决） | 35 |
-| `tb_cpu` | **完整 CPU**：取指→执行→写回全通路（行为级存储器替代 IP），含 load-use、背靠背 load、store 的 rs2 无前递、store→load 同址、LB/LH/LBU/LHU 扩展、循环（分支目标非幂等） | 36 |
+| `tb_csr` | **CSR 文件**：mstatus/mie/mtvec/mscratch/mepc/mcause 读写、只读寄存器、地址译码、同拍写前递、**陷阱入口（mepc/mcause/MPIE）**、MRET、中断挂起 | 34 |
+| `tb_ex` | 前递优先级（EX/MEM > MEM/WB）、**load 前递数据、CSR 前递读出的旧值**、store 数据取原始 rs2、x0/rd_we 屏蔽 | 23 |
+| `tb_mem` | `MEM_req` 的请求/字节使能/store 通道搬移/**对齐检查与非对齐门控** + `MEM_load` 的通道提取/符号扩展 | 41 |
+| `tb_control` | 冲刷、重定向、异常/中断陷阱与 cause 编码、优先级、MRET；**load-use 不停顿**；**重定向不冲刷 EX2MEM** | 55 |
+| `tb_cpu` | **完整 CPU**：取指→执行→写回全通路（行为级存储器替代 IP），含 load-use、背靠背 load、store 的 rs2 无前递、store→load 同址、LB/LH/LBU/LHU 扩展、循环（分支目标非幂等）、**JAL/JALR 链接值** | 40 |
 
 运行示例：
 
@@ -587,14 +589,45 @@ make tb TB=tb_rib_periph     # RIB + 外设
 | UART / SPI | BAUD / DIV / TXDATA 寄存器写读 |
 | SPI | `EN|START` 启动一次 8 bit 传输、BUSY 归零、DONE 置位 |
 
-共 **25 项**，全部通过。`tb_top`（SoC 顶层 + ROM/RAM IP）另有 **26 项**：
-CPU 寄存器/存储器副作用、GPIO 引脚、UART 实际发出的 `"OK\n"`（含停止位校验）、
-TIMER 溢出、程序流是否走错分支，全部通过。测试程序镜像由
-`tb/prog/gen_cpu_test.py` 汇编生成（`hex` / `coe` / `ROM.mif` 三者同源）：
+共 **25 项**，全部通过。
+
+#### 5）系统级 RV32I 全覆盖回归（`tb_top`）
+
+`make tb TB=tb_top` 跑的是**带 ROM/RAM IP 的完整 SoC**：CPU + RIB + 外设 + 真实
+BMG 存储器。程序（`tb/prog/gen_cpu_test.py` 生成）为**每条指令**准备用例，把结果
+写进 RAM 的「结果槽」；测试平台用影子内存读回，与期望值表逐槽比对：
+
+```text
+   RAM+0x400 起：结果槽（每个用例一个）
+   RAM+0x00    ：RESULT（1 通过 / 0 失败）
+   RAM+0x04    ：DONE 魔数 0x600D_1EAF（测试平台据此判断程序跑完）
+```
+
+| 覆盖 | 内容 |
+| --- | --- |
+| R 型 10 条 | add/sub/sll/slt/sltu/xor/srl/sra/or/and，含回绕、**移位量取 rs2[4:0]**、有符号/无符号边界 |
+| I 型 9 条 | addi/slti/sltiu/xori/ori/andi/slli/srli/srai，含 ±立即数上下界、`sltiu` 的立即数符号扩展 |
+| U 型 2 条 | lui、auipc（按本指令地址取值，含负偏移） |
+| 访存 8 条 | lb/lh/lw/lbu/lhu × 各字节/半字通道 + sb/sh/sw 通道隔离（回读整字确认邻居不变）、load-use、背靠背 load |
+| 分支 6 条 | beq/bne/blt/bge/bltu/bgeu 各含「跳 / 不跳」与有符号/无符号边界（共 16 个用例） |
+| 跳转 2 条 | jal（前向/后向、带链接 rd≠x0）、jalr（目标、**&~1 对齐**、rs1+imm、后向跳转、链接值） |
+| 其它 | fence（次序提示）、UART 实发 `"OK\n"`、GPIO 回环、TIMER 溢出 |
+
+**当前：118 项期望值中 105 项通过**（95 个指令结果槽 + CSR 自测全部通过 +
+陷阱/中断的记录项待收尾 + RESULT/DONE + GPIO/TIMER/UART 引脚）。
+
+> **异常 / 中断已接入**（CSR + 陷阱入口 + MRET）：`tb_csr` / `tb_decoder` /
+> `tb_control` 模块级全绿；系统级已能观察到 ECALL/EBREAK/非法指令/非对齐访存
+> 正确进入处理程序（cause、mepc 正确，MRET 正确返回），但处理程序的
+> **记录簿记（记录指针）**仍有问题，见 7 节「进行中」。
+>
+> 结果槽期望值不是手算：生成器内置一份 **RV32I 参考模型**，每条指令在生成时
+> 同时被模型执行，期望值与「指令实际语义」交叉核对；另有覆盖率自检，
+> **RV32I 清单缺任何一条都会直接报错退出**。
 
 ```bash
-python3 tb/prog/gen_cpu_test.py      # 重新生成程序镜像（自带往返解码自检）
-make tb TB=tb_top                    # 用新镜像跑 SoC 顶层测试
+python3 tb/prog/gen_cpu_test.py      # 生成 hex/coe/ROM.mif/期望值表 + 覆盖率自检
+make tb TB=tb_top                    # 用新程序跑系统级回归（需要 ROM.mif 已更新）
 ```
 
 > 限制：xsim 需要可写的 `/dev/shm`；在容器等受限环境中若报
@@ -749,9 +782,21 @@ T+1 拍数据回来了而 `mem_alu_result` 已前进 —— 提取用的字节�
 - **访存通路**（`tb_mem` 38 项）：`MEM_req` 的请求/字节使能/store 通道搬移 +
   `MEM_load` 的对齐检查/通道提取/符号与零扩展。
 - **控制单元**（`tb_control` 35 项）：冲刷、重定向、异常、优先级；数据冒险不停顿。
-- **完整 CPU**（`tb_cpu` 36 项）：取指→执行→写回全通路，覆盖 load-use、
+- **完整 CPU**（`tb_cpu` 40 项）：取指→执行→写回全通路，覆盖 load-use、
   背靠背 load、store 的 `rs2` 无前递、store→load 同址、LB/LH/LBU/LHU 扩展、
-  以及**循环（分支目标为非幂等指令）**。
+  循环（分支目标为非幂等指令）、**JAL/JALR 链接值（rd≠x0）**。
+- **控制单元**（`tb_control` 38 项）：含「重定向不冲刷 EX2MEM」这条硬约束。
+
+**★ 系统级 RV32I 全覆盖回归（`tb_top`，带 ROM/RAM IP 的完整 SoC）**
+
+- 程序由 `tb/prog/gen_cpu_test.py` 生成：内置 **RV32I 参考模型**（期望值与指令
+  语义交叉核对）+ **覆盖率自检**（缺一条指令直接报错）+ 往返解码自检。
+- 覆盖 **RV32I 非陷阱指令 38/40**：R 型 10、I 型 9、U 型 2、访存 8（含通道
+  隔离、load-use、背靠背 load）、分支 6（16 个跳/不跳与边界用例）、跳转 2
+  （含 `&~1` 对齐、后向 jalr）、fence；另含 UART 实发 `"OK\n"`、GPIO 回环、
+  TIMER 溢出轮询。
+- **共 102 项检查全部通过**（95 个结果槽 + RESULT/DONE + 外设引脚）。
+- ECALL/EBREAK 属陷阱指令，需 CSR/异常机制，目前只在 `tb_decoder` 做译码覆盖。
 
 **★ 数据侧 BRAM 读延迟对齐（本次解决）**
 
@@ -775,6 +820,7 @@ MEM 级只保留取数通路 `MEM_load.sv`）：
 | 外设读数据寄存一拍 | `TIMER` / `SPI` / `UART` / `GPIO` 的读回寄存输出，与 ROM/RAM 统一为「T 拍给地址、T+1 拍数据」 |
 | `EX` load 前递 | EX/MEM 是 load 时前递 **MEM 级组合提取出的数据**，`load-use` 不再需要停顿 |
 | `EX` store 数据源 | `rs2` 的「无前递」来源改为寄存器堆读出的原始 `rs2`（原来取 `id_ex_op2`，S 型 `op2_sel=IMM` 会把立即数当数据写进内存 —— 这是个隐藏 bug，`tb_cpu` 现在有专门用例） |
+| `Control` 重定向不再冲刷 EX2MEM | 原来 `flush_ex2mem = redirect \| exception`，而 **JAL / JALR 正是产生重定向的那条指令**：它还要把返回地址（PC+4）经 EX2MEM→MEM2WB 写回 rd。连 EX2MEM 一起清空后，`jal ra, func` / `jalr ra, 0(rs1)` 的返回地址永远写不回去（分支不写回，所以以前没暴露）。现在 `flush_ex2mem = exception`，异常仍清（出错指令不允许写回） |
 | `Control` 简化 | 去掉 load-use 停顿逻辑（`stall_*` 恒 0），只保留冲刷 / 重定向 / 异常 |
 | 取指控制修正 | 重定向改为「两个 NOP 注入」且**不冻结 PC**（原实现冻结 PC 会让分支目标指令执行两次）；总线抢占改为「当拍冻结 PC + 下一拍注入 NOP」；复位释放后第一拍注入 NOP（原实现首条指令会执行两遍） |
 | `UART` 起始位修正 | 波特率计数器空闲停在 0，导致刚进入发送时 `baud_tick` 立刻有效、起始位只持续 1 拍（整帧短一个位周期，接收方错一位）。现在进入「忙」时先装一个完整位周期，且 `baud_tick` 只在计数器已在运行时有效 |
@@ -809,11 +855,31 @@ MEM 级只保留取数通路 `MEM_load.sv`）：
   ID/EX 级，避免只冻结取指导致指令流错位。
 - **分支机构**：分支在 EX 解析（2 气泡），可前移到 ID；无分支预测。
 
-**② 异常与中断**
+**② 异常与中断（进行中，仅差系统级收尾）**
 
-- `exception_en` 已产生但未接入异常处理（无 `mcause`/`mepc`/CSR）；
-  `mem_align_err` 已算出但未上报到 `Control`；`int_i` 已接定时器中断，但 CPU 侧
-  无中断响应。
+已实现（模块级全绿）：
+
+- **CSR 文件** `rtl/Core/CSR/CSR.sv`：mstatus / misa / mie / mtvec / mscratch /
+  mepc / mcause / mtval / mip，读在 EX 级、写经 EX2MEM 到 MEM 级提交
+  （保证陷阱精确），带同拍写前递。
+- **Zicsr 六条**（CSRRW/S/C + 立即数形式）与 **MRET**；非法 CSR 地址 / 写只读
+  CSR → 非法指令异常。
+- **陷阱入口**：非法指令(2)、EBREAK(3)、非对齐 load(4)/store(6)、ECALL(11)、
+  定时器中断(0x8000_0007)；异常在 EX 级冲刷 EX2MEM（出错指令不写回），
+  **非对齐访存在 EX 级就被拦下并门控请求**（不会先写坏内存再报异常）。
+- **中断**：`mip.MTIP & mie.MTIE & mstatus.MIE`，只在「EX 级是真实指令且不是
+  访存指令」时受理（避免让已发出访存的指令部分执行）。
+- 三个由此暴露并修复的**真实 bug**：
+  1. 陷阱与「更老的 CSR 写」同拍时不能覆盖整个写（否则紧挨 `csrw mtvec` 的陷阱
+     会跳到旧向量）；现在先做 CSR 写、再由陷阱覆盖同寄存器的情形。
+  2. `mtvec` 需要同拍前递，否则设置向量后的下一条指令陷入会跳到旧向量。
+  3. **CSR 指令写入 rd 的是 CSR 旧值，EX/MEM 前递路径必须前递它**（与 load 数据
+     同理）；此前「CSR 指令 → 紧随其后使用其结果的指令」拿到的是 ALU 结果。
+
+待收尾：系统级陷阱用例里，处理程序的**记录簿记**仍有问题 —— 记录指针最终为
+0x560（期望 0x270），记录写到错误地址，程序随后卡住；`tb_top` 因此尚未全绿
+（118 项中 105 项通过）。下一步就是定位这条 `sw x23, TRAP_PTR` /
+`lw x26, TRAP_PTR` 的指针链路。
 
 **③ 外设增强**
 

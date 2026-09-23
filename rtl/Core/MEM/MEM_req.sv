@@ -42,15 +42,33 @@ module MEM_req (
     output logic [`DATA_BUS] mem_wdata,        // 已对齐到正确字节通道
     output logic [      3:0] mem_be,           // 字节使能
     output logic             mem_req,          // 读或写请求（本拍有效）
-    output logic             mem_we            // 1=写, 0=读
+    output logic             mem_we,           // 1=写, 0=读
+    output logic             mem_align_err     // 地址不对齐（非对齐访问不得触内存）
 );
+
+    //------------------------------------------------------------------
+    // 0. 地址对齐检查（必须在发起之前做）
+    //    非对齐访问要在 EX 级就拦下来并报异常，否则：
+    //      · 非对齐 store 会先写坏内存再报异常（副作用先于陷阱）
+    //      · 该指令还要在 MRET 后重放，等于写两次
+    //    因此 mem_req/mem_we 都对 mem_align_err 做门控。
+    //------------------------------------------------------------------
+    always_comb begin
+        case (mem_size)
+            `MSZ_B : mem_align_err = `FALSE;
+            `MSZ_H : mem_align_err = mem_alu_result[0];
+            `MSZ_W : mem_align_err = (mem_alu_result[1:0] != 2'b00);
+            default: mem_align_err = `FALSE;
+        endcase
+        if (!(mem_read | mem_write)) mem_align_err = `FALSE;
+    end
 
     //------------------------------------------------------------------
     // 1. 地址直接来自 ALU 结果
     //------------------------------------------------------------------
     assign mem_addr = mem_alu_result;
-    assign mem_req  = mem_read | mem_write;
-    assign mem_we   = mem_write;
+    assign mem_req  = (mem_read | mem_write) & ~mem_align_err;
+    assign mem_we   = mem_write & ~mem_align_err;
 
     //------------------------------------------------------------------
     // 2. 存储数据对齐

@@ -25,7 +25,17 @@ module Decoder (
         output logic             illegal,       // 非法指令
         output logic             ecall,
         output logic             ebreak,
-        output logic             fence
+        output logic             fence,
+
+        // ---- Zicsr / 陷阱返回 ----
+        output logic             csr_en,        // 是 CSR 指令
+        output logic [      2:0] csr_op,        // funct3：RW/RS/RC/RWI/RSI/RCI
+        output logic [     11:0] csr_addr,      // instr[31:20]
+        output logic             csr_imm,       // 1 = 立即数形式（rs1 字段是 uimm）
+        output logic [      4:0] csr_uimm,      // 立即数形式的 5 bit 无符号操作数
+        output logic             csr_we,        // 该指令是否需要写 CSR
+                                                //（RS/RC 且 rs1=0、RSI/RCI 且 uimm=0 时不写）
+        output logic             mret           // MRET
     );
 
     // 公共字段提取
@@ -62,6 +72,13 @@ module Decoder (
         op2_sel      = `OP2_RS2;
         imm          = 32'b0;
         wb_sel       = `WB_ALU;
+        csr_en       = `FALSE;
+        csr_op       = `CSR_OP_RW;
+        csr_addr     = 12'b0;
+        csr_imm      = `FALSE;
+        csr_uimm     = 5'b0;
+        csr_we       = `FALSE;
+        mret         = `FALSE;
         mem_size     = `MSZ_W;
         mem_read     = `DISABLE;
         mem_write    = `DISABLE;
@@ -256,17 +273,36 @@ module Decoder (
             end
             `INST_TYPE_SYS: begin
                 if (funct3 == `FCT3_PRIV) begin
+                    // funct3 = 0：特权指令
                     case (instr[31:20])
-                        12'h000:
-                            ecall = `TRUE;
-                        12'h001:
-                            ebreak = `TRUE;
-                        default:
-                            illegal = `TRUE;
+                        12'h000: ecall = `TRUE;
+                        12'h001: ebreak = `TRUE;
+                        12'h302: mret  = `TRUE;      // MRET
+                        default: illegal = `TRUE;
                     endcase
                 end
                 else begin
-                    illegal = `TRUE;
+                    // funct3 != 0：Zicsr（CSRRW/S/C + 立即数形式）
+                    case (funct3)
+                        `CSR_OP_RW, `CSR_OP_RS, `CSR_OP_RC,
+                        `CSR_OP_RWI, `CSR_OP_RSI, `CSR_OP_RCI: begin
+                            csr_en   = `TRUE;
+                            csr_op   = funct3;
+                            csr_addr = instr[31:20];
+                            csr_imm  = funct3[2];            // 1xx = 立即数形式
+                            csr_uimm = instr[19:15];
+                            rd_addr  = rd;
+                            rd_we    = `ENABLE;
+                            wb_sel   = `WB_CSR;              // 写回 CSR 旧值
+                            // 源操作数用 rs1（rs1_addr 恒等于 instr[19:15]，
+                            // 立即数形式时它就是 uimm，CPU_top 按 csr_imm 区分）
+                            // RS/RC 且 rs1=0、RSI/RCI 且 uimm=0 → 不写 CSR
+                            csr_we   = (funct3 == `CSR_OP_RW ||
+                                        funct3 == `CSR_OP_RWI) ? `ENABLE
+                                                              : (rs1 != 5'b0);
+                        end
+                        default: illegal = `TRUE;
+                    endcase
                 end
             end
             default: begin

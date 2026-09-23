@@ -4,7 +4,6 @@
 
 //=====================================================================
 // MEM_load : MEM 级读数据通路
-//   - 地址对齐检查（load / store 共用）
 //   - 加载数据字节通道提取
 //   - 符号 / 零扩展
 //
@@ -20,36 +19,21 @@ module MEM_load (
     input  wire [`DATA_BUS]  mem_alu_result,   // 访存地址（EX 级 ALU 结果）
     input  wire [      1:0]  mem_size,         // MSZ_B / MSZ_H / MSZ_W
     input  wire              mem_read,
-    input  wire              mem_write,
     input  wire              mem_unsigned,
 
     // ---------- 来自数据存储器 ----------
     input  wire [`DATA_BUS]  mem_rdata,
 
     // ---------- 输出到 MEM2WB ----------
-    output logic [`DATA_BUS] mem_rdata_ext,    // 提取 + 扩展后的加载数据
-    output logic             mem_align_err     // 地址不对齐异常
+    output logic [`DATA_BUS] mem_rdata_ext     // 提取 + 扩展后的加载数据
 );
 
     //------------------------------------------------------------------
-    // 1. 地址对齐检查
-    //    B : 无对齐要求
-    //    H : addr[0] == 0
-    //    W : addr[1:0] == 00
+    // 地址对齐检查已前移到 MEM_req（EX 级，发起访存之前），见那边说明。
     //------------------------------------------------------------------
-    always_comb begin
-        case (mem_size)
-            `MSZ_B : mem_align_err = `FALSE;
-            `MSZ_H : mem_align_err = mem_alu_result[0];
-            `MSZ_W : mem_align_err = (mem_alu_result[1:0] != 2'b00);
-            default: mem_align_err = `FALSE;
-        endcase
-        // 只有访存指令才需要报对齐异常
-        if (!(mem_read | mem_write)) mem_align_err = `FALSE;
-    end
 
     //------------------------------------------------------------------
-    // 2. 加载数据提取（按地址低位选字节/半字）
+    // 1. 加载数据提取（按地址低位选字节/半字）
     //------------------------------------------------------------------
     logic [`DATA_BUS] load_data;
 
@@ -74,7 +58,7 @@ module MEM_load (
     end
 
     //------------------------------------------------------------------
-    // 3. 符号 / 零扩展
+    // 2. 符号 / 零扩展
     //    - 非 load 指令输出 0
     //    - mem_unsigned=1 : 零扩展
     //    - mem_unsigned=0 : 符号扩展

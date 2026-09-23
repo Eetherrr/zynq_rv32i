@@ -2,37 +2,28 @@
 `include "sys_define.svh"
 
 //=====================================================================
-// tb_top — CPU 功能验证测试平台
+// tb_top — RV32I 系统级验证测试平台（SoC 顶层 + ROM/RAM IP + 全部外设）
 //
-//   把 tb/prog/cpu_test.hex 载入 ROM，复位后让 CPU 自由运行，直到程序
-//   把结果写进 RAM[0x1000_0000]（1 = 通过，0 = 失败）并进入挂死循环。
-//   然后由测试平台核对：
-//     1. 结果字          RAM[0x1000_0000] == 1
-//     2. 寄存器堆        x1~x20 的架构可见值与程序预期一致
-//     3. 内存副作用      RAM[0x1000_0000]、[0x1000_0004] 最终内容
-//     4. GPIO 副作用     DIR / DATA 引脚电平
-//     5. 串口输出        UART 引脚上收到的字节必须是 "OK\n"
-//     6. 程序流          是否跑飞到了失败汇合点 0x100
+//   流程：
+//     1. ROM 内容来自 tb/prog/ROM.mif（由 tb/prog/gen_cpu_test.py 生成），
+//        程序自带 RV32I 全覆盖用例，每个用例把结果写进 RAM 的一个「结果槽」；
+//     2. 程序末尾写 RESULT（1 通过 / 0 失败）与 DONE 魔数，然后挂死；
+//     3. 本测试平台用「影子内存」镜像 CPU 对 RAM 的写操作，等 DONE 魔数出现后
+//        逐槽与 tb/prog/cpu_test.exp 里的期望值比对，并核对外设副作用。
 //
-//   覆盖的指令 / 机制（逐条对应 tb/prog/cpu_test.hex，已做往返解码核对）
-//     ALU    : ADD / SUB / AND / OR
-//     立即数 : ADDI（含负立即数 -0x411、0xBEF）、ANDI、LUI
-//     访存   : LW / SW（字）、SB / LBU（字节）、SH / LHU（半字）
-//     控制流 : BEQ（跳与不跳）、BNE（跳与不跳）、JAL
-//     外设   : UART（波特率 + STATUS 轮询 + 发 "OK\n"）、GPIO（DIR/DATA）、
-//              TIMER（装载 + 启动 + 轮询 OVERFLOW + 写 1 清标志）
-//     冒险   : LOAD-USE（0x048 的 lw 紧跟 0x044 的 sw，同地址）、RAW 前递、
-//              分支/跳转冲刷
+//   核对内容：
+//     1. 期望值表      cpu_test.exp 每行「RAM 地址 期望值 名称」：
+//                      指令结果槽 + CSR 读写结果 + 陷阱记录(mcause/mepc)
+//     2. RESULT / DONE RAM[0] == 1、RAM[1] == 0x600D_1EAF
+//     3. GPIO          DIR / DATA 引脚电平、输入回环
+//     4. TIMER         OVERFLOW 置位
+//     5. UART          引脚上真实收到的 "OK\n"（含停止位校验）
 //
-//   未覆盖（后续补）：JALR、BLT/BGE/BLTU/BGEU、SLL/SRL/SRA/SLT/SLTU、
-//                     LB/LH、非对齐访问异常、CSR/中断响应
+//   指令覆盖：RV32I 40/40（含 ECALL/EBREAK/FENCE）+ Zicsr 六条 CSR 指令；
+//             另覆盖异常入口（非法指令 / 非对齐访存）、MRET 与定时器中断。
 //
 //   运行： make tb TB=tb_top
-//
-//   说明：程序镜像由 ROM IP 的初始化文件 tb/prog/cpu_test.coe 预置
-//         （IP 内部数组不可直接写入）。
-//         读回校验用测试平台内的「影子内存」镜像 CPU 的 RAM 写操作，
-//         不依赖 IP 内部层次结构。
+//         （改测试程序后先跑 python3 tb/prog/gen_cpu_test.py）
 //=====================================================================
 module tb_top;
 
@@ -41,12 +32,18 @@ module tb_top;
     //------------------------------------------------------------------
     parameter real CLK_PERIOD = 10.0;                       // 100 MHz
     parameter      PROG_FILE  = "/home/ether/edev/fpga/prj/zynq_rv32i/tb/prog/cpu_test.hex";
+    parameter      EXP_FILE   = "/home/ether/edev/fpga/prj/zynq_rv32i/tb/prog/cpu_test.exp";
     parameter int  PROG_WORDS = 4096;                       // ROM 容量（字）
     parameter int  UART_DIV   = 867;                        // 与程序写入的 BAUD 一致
     parameter real BIT_NS     = (UART_DIV + 1) * CLK_PERIOD; // 一个位周期 ≈ 8680 ns
-    // 超时上限：程序要发 3 个 UART 字节，每个位周期 8.68us、一帧 10 位，
-    // 单帧 ≈ 87us，因此上限取 2ms（20 万个时钟周期）比较稳妥。
-    parameter real TIMEOUT_NS = 2000000.0;
+    // 超时：程序要发 3 个 UART 字节（每帧 ≈ 87us，含等待），留足余量取 1.5ms
+    parameter real TIMEOUT_NS = 1500000.0;
+
+    // 结果槽 / 结束标志（与 gen_cpu_test.py 的布局一致）
+    localparam int DONE_WORD  = 1;                          // RAM 字 1 = 字节 0x04
+    localparam int SLOT_WORD  = 256;                        // RAM 字 0x100 = 字节 0x400
+    localparam logic [31:0] DONE_MAGIC = 32'h600D_1EAF;
+    localparam int MAX_SLOTS  = 256;
 
     //------------------------------------------------------------------
     // 时钟 / 复位
@@ -85,106 +82,52 @@ module tb_top;
     //------------------------------------------------------------------
     // 观测点
     //------------------------------------------------------------------
-    wire        mem_we    = u_dut.cpu_ram_we;
-    wire [31:0] mem_addr  = u_dut.cpu_ram_addr;
-    wire [31:0] mem_wdata = u_dut.cpu_ram_wdata;
     wire [31:0] cur_pc    = u_dut.u_CPU_top.if_pc;
     wire        rst_sys   = u_dut.rst_sys;
 
-    bit          result_seen = 1'b0;
-    logic [31:0] result_w    = 32'hDEAD_DEAD;
-
     //------------------------------------------------------------------
-    // 结束判定：程序末尾停在固定挂死点
-    //   0x168 jal x0,0  结束挂死点（通过 / 失败都停在这里，
-    //                   通过与否看 RESULT 字）
-    // 注意：不能用「第一次写 RAM[0]」当结束标志 —— 程序中间（0x044）
-    //       就会写一次 RAM[0] 作为访存自检，那样会在程序跑完前就下结论。
+    // RAM 影子内存
+    //   RAM 是 BMG IP，内部数组的层次路径依赖 IP 实现细节，不适合硬编码。
+    //   这里镜像 RIB 送给 RAM 从机的写事务，供最终校验使用。
     //------------------------------------------------------------------
-    localparam logic [31:0] PC_HANG_PASS = 32'h0000_0168;
-    localparam logic [31:0] PC_HANG_FAIL = 32'h0000_0168;
-    bit          program_done = 1'b0;
-    int          hang_cnt     = 0;
+    localparam int RAM_WORDS = 16384;
+    logic [31:0] ram_shadow [0:RAM_WORDS-1];
+    int          ram_wr_cnt = 0;
+    bit          done_seen  = 1'b0;
 
-    // 说明：末尾是 `jal x0,0` 自跳，流水线在重定向前会先跑几拍，PC 并不是
-    //       每拍都等于挂死点（而是 4 拍一个来回），因此这里统计「命中次数」
-    //       而不是「连续拍数」。
     always @(posedge clk_sys) begin
-        if (rst_sys == `RESET_DIS &&
-            (cur_pc == PC_HANG_PASS || cur_pc == PC_HANG_FAIL)) begin
-            hang_cnt <= hang_cnt + 1;
-            if (hang_cnt >= 3) program_done <= 1'b1;
+        if (u_dut.s_ram_we) begin
+            logic [3:0] be;
+            case (u_dut.s_ram_size)
+                `MSZ_B:  be = 4'b0001 << u_dut.s_ram_addr[1:0];
+                `MSZ_H:  be = u_dut.s_ram_addr[1] ? 4'b1100 : 4'b0011;
+                default: be = 4'b1111;
+            endcase
+            for (int b = 0; b < 4; b = b + 1) begin
+                if (be[b])
+                    ram_shadow[u_dut.s_ram_addr[15:2]][8*b +: 8]
+                              <= u_dut.s_ram_wdata[8*b +: 8];
+            end
+            ram_wr_cnt <= ram_wr_cnt + 1;
+
+            // DONE 魔数：整字写入 RAM 字 1
+            if (u_dut.s_ram_addr[15:2] == DONE_WORD[13:0] &&
+                u_dut.s_ram_size == `MSZ_W &&
+                u_dut.s_ram_wdata == DONE_MAGIC)
+                done_seen <= 1'b1;
         end
     end
 
-    //------------------------------------------------------------------
-    // 取指对齐诊断：复位后头 20 拍，逐拍列出
-    //   if_pc（PC 寄存器输出）/ rom_instr（ROM 锁定输出）
-    //   / id_pc、id_instr（IF2ID 锁存结果）
-    //   判断「指令是否与它应属的地址配对」。
-    //   TRACE_MAX 设 0 可关闭。
-    //------------------------------------------------------------------
-    int TRACE_MAX = 0;      // 关了取指对齐打印
-    int fa_cnt = 0;
-
-    // 诊断用：写回 / 访存事务跟踪（TRACE_WB=1 打开）
-    bit TRACE_WB = 1'b0;
-    int wb_cnt = 0;
-    always @(posedge clk_sys) begin
-        if (TRACE_WB && rst_sys == `RESET_DIS && u_dut.u_CPU_top.wb_rd_we && wb_cnt < 80) begin
-            wb_cnt = wb_cnt + 1;
-            $display("[WB] pc=%h x%0d <= %h", u_dut.u_CPU_top.u_MEM2WB.wb_pc4 - 4,
-                     u_dut.u_CPU_top.wb_rd_addr, u_dut.u_CPU_top.wb_wdata);
-        end
-    end
-    always @(posedge clk_sys) begin
-        if (TRACE_WB && rst_sys == `RESET_DIS && (u_dut.cpu_ram_we | u_dut.cpu_ram_re))
-            $display("[BUS] a=%h we=%b re=%b d=%h | if_grant=%b valid=%b ifpc=%h rom=%h",
-                     u_dut.cpu_ram_addr, u_dut.cpu_ram_we, u_dut.cpu_ram_re,
-                     u_dut.cpu_ram_wdata, u_dut.if_grant, u_dut.bus_grant_valid,
-                     u_dut.u_CPU_top.if_pc, u_dut.u_CPU_top.if_instr);
-    end
-
-    always @(posedge clk_sys) begin
-        if (rst_async && fa_cnt < TRACE_MAX) begin
-            fa_cnt = fa_cnt + 1;
-            $display("[FA] if_pc=%h rom_instr=%h | id_pc=%h id_instr=%h",
-                     u_dut.u_CPU_top.if_pc,
-                     u_dut.u_CPU_top.if_instr,
-                     u_dut.u_CPU_top.id_pc,
-                     u_dut.u_CPU_top.id_instr);
-        end
-    end
-
-    // 程序流追踪：CPU 是否跑飞到了失败汇合点
-    bit          reached_fail_path = 1'b0;
-
-    always @(posedge clk_sys) begin
-        if (!result_seen && mem_we && (mem_addr == `RAM_BASE)) begin
-            result_w    <= mem_wdata;
-            result_seen <= 1'b1;
-        end
-        // 用 EX 级 PC 判断「真的执行了」：取指 PC 会超前，分支后面
-        // 那条错误路径指令可能只是被预取、随后被冲刷掉，不能算执行。
-        if (u_dut.u_CPU_top.id_ex_pc == 32'h0000_015c)
-            reached_fail_path <= 1'b1;
-    end
+    function automatic logic [31:0] peek_ram(input int word_idx);
+        peek_ram = ram_shadow[word_idx];
+    endfunction
 
     //------------------------------------------------------------------
-    // 程序镜像
-    //------------------------------------------------------------------
-    logic [31:0] prog [0:PROG_WORDS-1];
-    bit          prog_loaded = 1'b0;
-    int          fd;
-
-    //------------------------------------------------------------------
-    // 串口接收：起始位下降沿后，每个位周期采一次，采样点落在位中间，
-    //           与 DUT 发送边沿相差 5 ns，不会踩在跳变上。
+    // 串口接收：起始位下降沿后每个位周期采一次，采样点落在位中间
     //------------------------------------------------------------------
     int         uart_count = 0;
-    logic [7:0] uart_last  = 8'h00;
     bit         uart_ok    = 1'b1;
-    logic [7:0] uart_byte  [0:7];       // 实际收到的字节序列（最多存 8 个）
+    logic [7:0] uart_byte  [0:7];
 
     task automatic uart_recv_byte(output logic [7:0] data, output bit stop_ok);
         logic [7:0] d;
@@ -206,77 +149,53 @@ module tb_top;
         logic [7:0] b;
         uart_recv_byte(b, st);
         uart_count = 1;
-        uart_last  = b;
         uart_byte[0] = b;
         $display("[UART ] byte #1 = 0x%02x ('%c') stop=%0b", b,
                  (b >= 8'h20 && b < 8'h7F) ? b : 8'h2E, st);
-        if (!st)
-            uart_ok = 1'b0;
+        if (!st) uart_ok = 1'b0;
         forever begin
             uart_recv_byte(b, st);
-            if (uart_count < 8)
-                uart_byte[uart_count] = b;
+            if (uart_count < 8) uart_byte[uart_count] = b;
             uart_count = uart_count + 1;
-            uart_last  = b;
             $display("[UART ] byte #%0d = 0x%02x ('%c') stop=%0b", uart_count, b,
                      (b >= 8'h20 && b < 8'h7F) ? b : 8'h2E, st);
-            if (!st)
-                uart_ok = 1'b0;
+            if (!st) uart_ok = 1'b0;
         end
     endtask
 
-    // 串口接收进程：独立 initial 块，与主流程并发
     initial
         uart_recv_all();
 
     //------------------------------------------------------------------
-    // 检查辅助：用整数编号 + 模块级字符串表，避开仿真器对 %s 参数的
-    //           格式化差异；编号与 names[] 一一对应。
+    // 诊断开关（默认关闭）
     //------------------------------------------------------------------
-    int    errors = 0;
-    string names [0:31];
-
-    //------------------------------------------------------------------
-    // RAM 影子内存（shadow memory）
-    //   RAM 已换成 Block Memory Generator IP，其内部数组的层次路径依赖
-    //   IP 实现细节（不同版本/配置会变），不适合在测试平台里硬编码。
-    //   这里改为「镜像」RAM 的实际写入：观察 RIB 送给 RAM 从机的
-    //   s_ram_we / s_ram_addr / s_ram_wdata / s_ram_size，在测试平台内
-    //   维护一份 RAM 内容副本用于最终校验。
-    //   用 s_ram_we（RIB → RAM 的实际写使能）而不是 CPU 侧 mem_we，
-    //   可以准确反映「这一拍 RAM 是否真的被写入」。
-    //------------------------------------------------------------------
-    localparam int RAM_WORDS = 16384;
-    logic [31:0] ram_shadow [0:RAM_WORDS-1];
-    int          ram_wr_cnt = 0;
+    int TRACE_MAX = 0;          // >0：复位后逐拍打印取指对齐信息
+    bit TRACE_WB  = 1'b0;       // 1：打印写回 / 访存事务
+    int fa_cnt = 0, wb_cnt = 0;
 
     always @(posedge clk_sys) begin
-        if (u_dut.s_ram_we) begin
-            // 字节使能由 size + 地址低位展开（与 rtl/Peripheral/RAM.sv 一致）
-            logic [3:0] be;
-            case (u_dut.s_ram_size)
-                `MSZ_B:
-                    be = 4'b0001 << u_dut.s_ram_addr[1:0];
-                `MSZ_H:
-                    be = u_dut.s_ram_addr[1] ? 4'b1100 : 4'b0011;
-                default:
-                    be = 4'b1111;
-            endcase
-            for (int b = 0; b < 4; b = b + 1) begin
-                if (be[b])
-                    ram_shadow[u_dut.s_ram_addr[15:2]][8*b +: 8]
-                              <= u_dut.s_ram_wdata[8*b +: 8];
-            end
-            ram_wr_cnt <= ram_wr_cnt + 1;
+        if (TRACE_MAX > 0 && rst_async && fa_cnt < TRACE_MAX) begin
+            fa_cnt = fa_cnt + 1;
+            $display("[FA] if_pc=%h rom_instr=%h | id_pc=%h id_instr=%h",
+                     u_dut.u_CPU_top.if_pc, u_dut.u_CPU_top.if_instr,
+                     u_dut.u_CPU_top.id_pc, u_dut.u_CPU_top.id_instr);
+        end
+        if (TRACE_WB && rst_sys == `RESET_DIS && u_dut.u_CPU_top.wb_rd_we && wb_cnt < 100) begin
+            wb_cnt = wb_cnt + 1;
+            $display("[WB] pc=%h x%0d <= %h", u_dut.u_CPU_top.u_MEM2WB.wb_pc4 - 4,
+                     u_dut.u_CPU_top.wb_rd_addr, u_dut.u_CPU_top.wb_wdata);
         end
     end
 
-    function automatic logic [31:0] peek_ram(input int word_idx);
-        peek_ram = ram_shadow[word_idx];
-    endfunction
+    //------------------------------------------------------------------
+    // 检查
+    //------------------------------------------------------------------
+    int    errors = 0, checks = 0;
+    string names [0:31];
 
     task automatic check(input int id, input logic [31:0] got,
                              input logic [31:0] exp);
+        checks = checks + 1;
         if (got === exp)
             $display("[PASS] #%0d %s = 0x%08x", id, names[id], got);
         else begin
@@ -289,9 +208,8 @@ module tb_top;
     task automatic dump_state();
         $display("---- 现场 ----");
         $display("  PC                = 0x%08x", cur_pc);
-        $display("  RESULT            = 0x%08x", result_w);
-        $display("  RAM[0x1000_0000]  = 0x%08x", peek_ram(0));
-        $display("  RAM[0x1000_0004]  = 0x%08x", peek_ram(1));
+        $display("  RESULT            = 0x%08x", peek_ram(0));
+        $display("  DONE              = 0x%08x", peek_ram(DONE_WORD));
         $display("  GPIO DIR / DATA   = 0x%02x / 0x%02x", gpio_t, gpio_o);
         $display("  TIMER count/ovf   = %0d / %0b",
                  u_dut.u_TIMER.count_reg, u_dut.u_TIMER.overflow_reg);
@@ -312,157 +230,146 @@ module tb_top;
     //------------------------------------------------------------------
     // 主流程
     //------------------------------------------------------------------
-    logic [31:0] R [1:15];
-    int          i;
+    logic [31:0] prog [0:PROG_WORDS-1];
+    logic [31:0] exp_addr [0:MAX_SLOTS-1];
+    logic [31:0] exp_val  [0:MAX_SLOTS-1];
+    string       exp_name [0:MAX_SLOTS-1];
+    int          n_slots = 0;
+    int          n_pass  = 0, n_fail = 0;
+    int          fd, i, rd_ok;
+    string       line, nm;
+    logic [31:0] v, a;
 
     initial begin
-        // 名称表
-        names[0]  = "RAM_RESULT_word";
-        names[1]  = "x1_addi_0";
-        names[2]  = "x2_addi_10";
-        names[3]  = "x3_add_sub";
-        names[4]  = "x4_add";
-        names[5]  = "x5_RAM_base";
-        names[6]  = "x6_or_then_1";
-        names[7]  = "x7_lw_word";
-        names[8]  = "x8_addi_7F";
-        names[9]  = "x9_base_plus_1";
-        names[10] = "x10_lbu";
-        names[11] = "x11_uart_base";
-        names[12] = "x12_addi_0";
-        names[13] = "x13_uart_last_byte";
-        names[14] = "x14_timer_status_w1";
-        names[15] = "x15_timer_load_200";
-        names[16] = "RAM_SW_final";
-        names[17] = "RAM_SH_final";
-        names[18] = "GPIO_DIR";
-        names[19] = "GPIO_DATA";
-        names[20] = "GPIO_IN_loopback";
-        names[21] = "TIMER_overflow_set";
-        names[22] = "no_fail_path";
-        names[23] = "x28_halfword_val";
-        names[24] = "x29_neg_immediate";
-        names[25] = "x30_final_zero";
+        names[0]  = "RESULT_word";
+        names[1]  = "DONE_magic";
+        names[2]  = "GPIO_DIR";
+        names[3]  = "GPIO_DATA";
+        names[4]  = "GPIO_IN_loopback";
+        names[5]  = "TIMER_overflow_set";
+        names[6]  = "UART_sent_OK_newline";
 
         $display("==========================================================");
-        $display(" tb_top - CPU functional test");
+        $display(" tb_top - RV32I 系统级验证（SoC + ROM/RAM IP + 外设）");
         $display("==========================================================");
 
-        // ---- 1. 载入程序镜像 ----
-        for (i = 0; i < PROG_WORDS; i = i + 1)
-            prog[i] = 32'h0000_0013;                        // 其余填 NOP
+        // ---- 0. 读期望值表（结果槽：每行「期望值 名称」）----
+        fd = $fopen(EXP_FILE, "r");
+        if (fd == 0) begin
+            $display("[FATAL] 打不开期望值文件：%s", EXP_FILE);
+            $display("        先运行 python3 tb/prog/gen_cpu_test.py");
+            $finish;
+        end
+        // 每行格式：RAM 字节地址 期望值 名称
+        while ($fgets(line, fd) != 0 && n_slots < MAX_SLOTS) begin
+            if (line.len() > 2) begin
+                rd_ok = $sscanf(line, "%h %h %s", a, v, nm);
+                if (rd_ok == 3) begin
+                    exp_addr[n_slots] = a;
+                    exp_val[n_slots]  = v;
+                    exp_name[n_slots] = nm;
+                    n_slots = n_slots + 1;
+                end
+            end
+        end
+        $fclose(fd);
+        if (n_slots == 0) begin
+            $display("[FATAL] 期望值文件为空：%s", EXP_FILE);
+            $finish;
+        end
+        $display("==> 结果槽 %0d 个（来自 %s）", n_slots, EXP_FILE);
 
+        // ---- 1. 检查程序镜像存在（ROM 内容由 ROM.mif 提供）----
+        for (i = 0; i < PROG_WORDS; i = i + 1) prog[i] = 32'h0000_0013;
         fd = $fopen(PROG_FILE, "r");
         if (fd == 0) begin
-            $display("[FATAL] cannot open program image: %s", PROG_FILE);
-            $display("        run make tb from the project root");
+            $display("[FATAL] 打不开程序镜像：%s", PROG_FILE);
             $finish;
         end
         $fclose(fd);
-        $readmemh(PROG_FILE, prog);
-        prog_loaded = 1'b1;
-        $display("==> program loaded: %s", PROG_FILE);
-
-        // 程序已在 ROM IP 内由 tb/prog/cpu_test.coe 初始化，
-        // 这里不再向 ROM 写数据（IP 内部数组不可直接访问）。
+        $display("==> 程序镜像：%s", PROG_FILE);
+        $display("    （ROM 实际内容由 tb/prog/ROM.mif 提供，run_tb.tcl 会拷到运行目录）");
 
         // ---- 2. 复位 ----
         rst_async = 1'b0;
         repeat (10) @(posedge clk_sys);
         rst_async = 1'b1;
-        $display("==> reset released, CPU running");
+        $display("==> 复位释放，CPU 运行中");
 
-        // ---- 3. 等结果（带超时） ----
-        fork : wait_result
+        // ---- 3. 等 DONE 魔数（带超时）----
+        fork : wait_done
             begin
-                wait (program_done);
+                wait (done_seen);
                 #(15 * BIT_NS);         // 让流水线里的 store 落地、串口把 3 字节发完
-                $display("==> program finished at t=%0t ns (PC=%h)",
-                         $time, cur_pc);
+                $display("==> 程序跑完，t=%0t（PC=%h，RAM 写 %0d 次）",
+                         $time, cur_pc, ram_wr_cnt);
             end
             begin
                 #(TIMEOUT_NS);
-                $display("[FATAL] timeout: program did not finish within %0t ns", TIMEOUT_NS);
+                $display("[FATAL] 超时：%0t 内没有看到 DONE 魔数", TIMEOUT_NS);
                 errors = errors + 1;
             end
         join_any
-        disable wait_result;
+        disable wait_done;
 
-        // ---- 4. 核对 ----
+        // ---- 4. 结果槽逐项比对 ----
         $display("");
-        $display("-- 1) result word --");
-        check(0, peek_ram(0), 32'h1);
-
-        $display("");
-        $display("-- 2) register file x1..x15 --");
-        for (i = 1; i <= 15; i = i + 1)
-            R[i] = u_dut.u_CPU_top.u_Regs.regs[i];
-
-        check(1,  R[1],  32'd0);            // addi x1, x0, 0
-        check(2,  R[2],  32'd10);           // addi x2, x0, 10
-        check(3,  R[3],  32'd10);           // 20 再 sub x2 -> 10
-        check(4,  R[4],  32'd10);           // add x1(0)+x2(10)
-        check(5,  R[5],  `RAM_BASE);        // 最后一次 lui x5, 0x10000
-        check(6,  R[6],  32'd1);            // 通过标志
-        check(7,  R[7],  32'd1);            // lw RAM[base] == 1
-        check(8,  R[8],  32'h7F);
-        check(9,  R[9],  `RAM_BASE + 32'd1);
-        check(10, R[10], 32'h7F);           // lbu
-        check(11, R[11], 32'h2000_0800);    // UART 基址 = 0x2000_0800
-        check(12, R[12], 32'd0);            // addi x12, x0, 0
-        check(13, R[13], 32'h0A);           // 最后一个 UART 字节 '\n'
-        check(14, R[14], 32'd1);            // TIMER STATUS 写 1 清标志
-        check(15, R[15], 32'd200);          // TIMER.LOAD 装载值
-        // 半字访存相关寄存器（x30/x31 在程序末尾被复用，其正确性由程序内
-        // 的 bne x31,x29 自检保证；这里核对未被复用的 x28 / x29）
-        check(23, u_dut.u_CPU_top.u_Regs.regs[28], 32'h0000_BEEF); // lui+addi 拼出 0xBEEF
-        check(24, u_dut.u_CPU_top.u_Regs.regs[29], 32'hFFFF_FBEF); // addi x29,x0,-0x411
-        check(25, u_dut.u_CPU_top.u_Regs.regs[30], 32'h0);         // 末次 addi x30,x0,0
-
-        $display("");
-        $display("-- 3) memory side effects --");
-        $display("       (影子内存共记录 %0d 次 RAM 写)", ram_wr_cnt);
-        check(16, peek_ram(0), 32'h1);                 // SW x6,0(x5)
-        // 只写过低半字，高半字未初始化，这里只比较低半字
-        begin
-            logic [31:0] sh_w;
-            sh_w = peek_ram(192);
-            check(17, {16'b0, sh_w[15:0]}, 32'h0000_BEEF);   // SH x28,0(x29)
+        $display("-- 1) 期望值表逐项比对（共 %0d 项：指令结果槽 + CSR + 陷阱记录）--",
+                 n_slots);
+        for (i = 0; i < n_slots; i = i + 1) begin
+            v = peek_ram(exp_addr[i][15:2]);
+            checks = checks + 1;
+            if (v === exp_val[i])
+                n_pass = n_pass + 1;
+            else begin
+                n_fail = n_fail + 1;
+                errors = errors + 1;
+                $display("[FAIL] #%0d %s @RAM+0x%03x : got=0x%08x exp=0x%08x",
+                         i, exp_name[i], exp_addr[i], v, exp_val[i]);
+            end
         end
+        $display("     期望值：通过 %0d / 失败 %0d", n_pass, n_fail);
 
+        // ---- 5. RESULT / DONE ----
         $display("");
-        $display("-- 4) GPIO side effects --");
-        check(18, {24'b0, gpio_t}, 32'h0000_00FF);
-        check(19, {24'b0, gpio_o}, 32'h0000_005A);
-        check(20, {24'b0, gpio_i}, 32'h0000_005A);
+        $display("-- 2) RESULT / DONE --");
+        check(0, peek_ram(0), 32'h1);
+        check(1, peek_ram(DONE_WORD), DONE_MAGIC);
 
+        // ---- 6. GPIO / TIMER ----
         $display("");
-        $display("-- 5) UART output on the wire --");
-        // 接收任务需要 3 个位周期收完最后一帧，这里在检查前再等一小段
-        #(5 * BIT_NS);
-        if (uart_count == 3 && uart_ok &&
+        $display("-- 3) 外设副作用 --");
+        check(2, {24'b0, gpio_t}, 32'h0000_00FF);
+        check(3, {24'b0, gpio_o}, 32'h0000_005A);
+        check(4, {24'b0, gpio_i}, 32'h0000_005A);
+        check(5, u_dut.u_TIMER.overflow_reg, 32'h1);
+
+        // ---- 7. UART 实际波形 ----
+        $display("");
+        $display("-- 4) UART 引脚输出 --");
+        #(2 * BIT_NS);
+        if (uart_count >= 3 && uart_ok &&
                 uart_byte[0] == 8'h4F &&        // 'O'
                 uart_byte[1] == 8'h4B &&        // 'K'
                 uart_byte[2] == 8'h0A)          // '\n'
-            $display("[PASS] #23 UART sent 'O','K','\\n' with valid stop bits");
+            $display("[PASS] #6 %s : '%c','%c','\\n' 停止位有效",
+                     names[6], uart_byte[0], uart_byte[1]);
         else begin
-            $display("[FAIL] #23 UART count=%0d stop_ok=%0b bytes=%02x %02x %02x",
-                     uart_count, uart_ok, uart_byte[0], uart_byte[1], uart_byte[2]);
+            $display("[FAIL] #6 %s : count=%0d stop_ok=%0b bytes=%02x %02x %02x",
+                     names[6], uart_count, uart_ok,
+                     uart_byte[0], uart_byte[1], uart_byte[2]);
             errors = errors + 1;
         end
+        checks = checks + 1;
 
-        $display("");
-        $display("-- 6) program flow --");
-        check(21, u_dut.u_TIMER.overflow_reg, 32'h1);
-        check(22, {31'b0, reached_fail_path}, 32'h0);
-
-        // ---- 5. 结论 ----
+        // ---- 8. 结论 ----
         $display("");
         $display("==========================================================");
+        $display(" 检查项：期望值 %0d + 其它 6 项 = %0d", n_slots, checks);
         if (errors == 0)
-            $display("==> CPU functional test PASSED");
+            $display("==> tb_top 通过：RV32I 40/40（含 ECALL/EBREAK/FENCE）+ Zicsr 系统级验证通过");
         else begin
-            $display("==> CPU functional test FAILED: %0d check(s)", errors);
+            $display("==> tb_top 失败：%0d 项不符", errors);
             dump_state();
         end
         $display("==========================================================");

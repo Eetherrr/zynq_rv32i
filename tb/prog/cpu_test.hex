@@ -1,109 +1,468 @@
 //=====================================================================
-// cpu_test.hex — tb_top 使用的 RV32I 测试程序镜像
+// cpu_test.hex — tb_top 使用的 RV32I 系统级测试程序镜像
 //
-//   本文件由 tb/prog/gen_cpu_test.py 汇编生成，不要手工改机器码。
-//   行号 N 对应 ROM 字数地址 N，即字节地址 N*4。
+//   由 tb/prog/gen_cpu_test.py 汇编生成（内置 RV32I 参考模型与覆盖率
+//   自检），不要手工改机器码。行号 N 即 ROM 字数地址 N（字节地址 N*4）。
 //
 //   地址映射（见 rtl/sys_define.svh）
-//     RAM   0x1000_0000    RESULT 在 0x1000_0000，半字测试在 0x1000_0300
-//     TIMER 0x2000_0000    LOAD +0 / COUNT +4 / CTRL +8 / STATUS +0x0C
-//     SPI   0x2000_0400
-//     UART  0x2000_0800    TXDATA +0 / RXDATA +4 / STATUS +8 / BAUD +0x0C
-//     GPIO  0x2000_0C00    DATA +0 / DIR +4 / SET +8 / CLR +0x0C
+//     RAM   0x1000_0000   RESULT +0 / DONE +4 / 访存测试 +0x10 /
+//                         半字自检 +0x300 / 结果槽 +0x400 起
+//     TIMER 0x2000_0000   LOAD +0 / COUNT +4 / CTRL +8 / STATUS +0x0C
+//     UART  0x2000_0800   TXDATA +0 / RXDATA +4 / STATUS +8 / BAUD +0x0C
+//     GPIO  0x2000_0C00   DATA +0 / DIR +4 / SET +8 / CLR +0x0C
 //
-//   结束：RESULT=1 通过 / RESULT=0 失败，随后停在末尾的 jal x0,0
+//   覆盖率：RV32I 非陷阱指令 完整；结果槽 104 个（期望值见 cpu_test.exp）
+//   结束：RESULT=1 通过 / RESULT=0 失败，随后写 DONE 魔数并挂死
 //
 //   运行： make tb TB=tb_top
 //=====================================================================
 
-00000093    // 0x000  addi x1, x0, 0        x1=0
-00a00113    // 0x004  addi x2, x0, 10       x2=10
-01400193    // 0x008  addi x3, x0, 20       x3=20
-00208233    // 0x00c  add  x4, x1, x2       x4=10 (RAW 前递)
-402181b3    // 0x010  sub  x3, x3, x2       x3=10
-0020f2b3    // 0x014  and  x5, x1, x2       x5=0
-0020e333    // 0x018  or   x6, x1, x2       x6=10
-00000013    // 0x01c  nop
-00000013    // 0x020  nop
-00000463    // 0x024  beq  x0, x0, +8       -> 0x02C
-00000337    // 0x028  lui  x6, 0            分支失败则破坏 x6
-00c0006f    // 0x02c  jal  x0, +12          -> 0x038
-00000337    // 0x030  lui  x6, 0            跳转失败则破坏 x6
-00000013    // 0x034  nop
-100002b7    // 0x038  lui  x5, 0x10000      x5=RAM 基址
-0002a303    // 0x03c  lw   x6, 0(x5)
-00100313    // 0x040  addi x6, x0, 1        x6=1
-0062a023    // 0x044  sw   x6, 0(x5)        RAM[base]=1
-0002a383    // 0x048  lw   x7, 0(x5)        x7=1 (load-use)
-07f00413    // 0x04c  addi x8, x0, 0x7F
-008280a3    // 0x050  sb   x8, 1(x5)        RAM 字节写
-00128493    // 0x054  addi x9, x5, 1
-0004c503    // 0x058  lbu  x10, 0(x9)       x10=0x7F
-07f00513    // 0x05c  addi x10, x0, 0x7F
-00a51463    // 0x060  bne  x10, x10, +8     永不跳转
-06f00593    // 0x064  addi x11, x0, 0x6F    占位
-00100593    // 0x068  addi x11, x0, 1       占位
-200005b7    // 0x06c  lui  x11, 0x20000     x11=0x2000_0000
-40058593    // 0x070  addi x11, x11, 0x400  +0x400
-40058593    // 0x074  addi x11, x11, 0x400  x11=0x2000_0800 UART 基址
-36300613    // 0x078  addi x12, x0, 867     100MHz/115200-1
-00c5a623    // 0x07c  sw   x12, 0x0C(x11)   UART.BAUD=867
-00000613    // 0x080  addi x12, x0, 0
-0085a683    // 0x084  lw   x13, 8(x11)      UART.STATUS
-0016f693    // 0x088  andi x13, x13, 1      取 TX_BUSY
-fe069ce3    // 0x08c  bne  x13, x0, -8      忙则等 -> 0x080
-04f00693    // 0x090  addi x13, x0, 'O'
-00d5a023    // 0x094  sw   x13, 0(x11)      UART.TXDATA='O'
-00000013    // 0x098  nop                   等 tx_busy 置起
-00000013    // 0x09c  nop
-00000013    // 0x0a0  nop
-00000013    // 0x0a4  nop
-0085a683    // 0x0a8  lw   x13, 8(x11)      UART.STATUS
-0016f693    // 0x0ac  andi x13, x13, 1
-fe069ce3    // 0x0b0  bne  x13, x0, -8      忙则等
-04b00693    // 0x0b4  addi x13, x0, 'K'
-00d5a023    // 0x0b8  sw   x13, 0(x11)      UART.TXDATA='K'
-00000013    // 0x0bc  nop                   等 tx_busy 置起
-00000013    // 0x0c0  nop
-00000013    // 0x0c4  nop
-00000013    // 0x0c8  nop
-0085a683    // 0x0cc  lw   x13, 8(x11)      UART.STATUS
-0016f693    // 0x0d0  andi x13, x13, 1
-fe069ce3    // 0x0d4  bne  x13, x0, -8      忙则等
-00a00693    // 0x0d8  addi x13, x0, '\n'
-00d5a023    // 0x0dc  sw   x13, 0(x11)      UART.TXDATA='\n'
-00000013    // 0x0e0  nop
-00000013    // 0x0e4  nop
-40058713    // 0x0e8  addi x14, x11, 0x400  x14=GPIO 基址
-0ff00793    // 0x0ec  addi x15, x0, 0xFF
-00f72223    // 0x0f0  sw   x15, 4(x14)      GPIO.DIR=0xFF
-05a00793    // 0x0f4  addi x15, x0, 0x5A
-00f72023    // 0x0f8  sw   x15, 0(x14)      GPIO.DATA=0x5A
-00072783    // 0x0fc  lw   x15, 0(x14)      x15=读回 DATA
-80058a13    // 0x100  addi x20, x11, -0x800 x20=TIMER 基址
-0c800793    // 0x104  addi x15, x0, 200     定时器装载值
-00fa2023    // 0x108  sw   x15, 0(x20)      TIMER.LOAD=200
-00300a93    // 0x10c  addi x21, x0, 3       EN=1, IRQ_EN=1
-015a2423    // 0x110  sw   x21, 8(x20)      TIMER.CTRL=3 启动
-00ca2a83    // 0x114  lw   x21, 0x0C(x20)   TIMER.STATUS
-001afa93    // 0x118  andi x21, x21, 1      取 OVERFLOW
-fe0a8ce3    // 0x11c  beq  x21, x0, -8      轮询溢出
-00100713    // 0x120  addi x14, x0, 1
-00ea2623    // 0x124  sw   x14, 0x0C(x20)   STATUS 写 1 清 OVERFLOW
-00100313    // 0x128  addi x6, x0, 1        通过标志
-00000013    // 0x12c  nop
-00000013    // 0x130  nop
-10000eb7    // 0x134  lui  x29, 0x10000     x29=RAM 基址
-300e8e93    // 0x138  addi x29, x29, 0x300  x29=0x1000_0300
-0000ce37    // 0x13c  lui  x28, 0xC         x28=0x0000_C000
-eefe0e13    // 0x140  addi x28, x28, -0x111 x28=0x0000_BEEF
-01ce9023    // 0x144  sh   x28, 0(x29)      RAM[0x300]=0xBEEF
-000eaf03    // 0x148  lw   x30, 0(x29)      x30=0xBEEF
-000edf83    // 0x14c  lhu  x31, 0(x29)      x31=0xBEEF
-bef00e93    // 0x150  addi x29, x0, -0x411  x29=0xFFFFFBEF
-00000f13    // 0x154  addi x30, x0, 0
-01df9463    // 0x158  bne  x31, x29, +8     半字读错则落到失败路径
-00000337    // 0x15c  lui  x6, 0            ★ 失败路径：x6=0
-100002b7    // 0x160  lui  x5, 0x10000
-0062a023    // 0x164  sw   x6, 0(x5)        RESULT = 1(通过) / 0(失败)
-0000006f    // 0x168  jal  x0, 0            ★ 挂死点
+
+// === 基址与常用常量 ===
+100002b7    // 0x000  lui  x5, 0x10000     x5 = RAM 基址
+00500093    // 0x004  addi x1, x0, 5       x1 = 5
+ffb00113    // 0x008  addi x2, x0, -5      x2 = -5
+800001b7    // 0x00c  lui  x3, 0x80000     x3 = 0x8000_0000
+fff18213    // 0x010  addi x4, x3, -1      x4 = 0x7FFF_FFFF
+12345337    // 0x014  lui  x6, 0x12345
+67830313    // 0x018  addi x6, x6, 0x678   x6 = 0x1234_5678
+fff00393    // 0x01c  addi x7, x0, -1      x7 = 0xFFFF_FFFF
+
+// === R 型：add / sub / sll / slt / sltu / xor / srl / sra / or / and ===
+00208533    // 0x020  add   add   5+(-5)
+40a2a023    // 0x024  sw   x10, 0x400  add   5+(-5)
+00120533    // 0x028  add   add   回绕 INT_MAX+4
+40a2a223    // 0x02c  sw   x10, 0x404  add   回绕 INT_MAX+4
+40608533    // 0x030  sub   sub   5-0x12345678
+40a2a423    // 0x034  sw   x10, 0x408  sub   5-0x12345678
+40110533    // 0x038  sub   sub   -5-5
+40a2a623    // 0x03c  sw   x10, 0x40c  sub   -5-5
+00109533    // 0x040  sll   sll   5<<5
+40a2a823    // 0x044  sw   x10, 0x410  sll   5<<5
+00209533    // 0x048  sll   sll   移位量取 rs2[4:0]
+40a2aa23    // 0x04c  sw   x10, 0x414  sll   移位量取 rs2[4:0]
+0011d533    // 0x050  srl   srl   逻辑右移
+40a2ac23    // 0x054  sw   x10, 0x418  srl   逻辑右移
+4011d533    // 0x058  sra   sra   算术右移
+40a2ae23    // 0x05c  sw   x10, 0x41c  sra   算术右移
+0013d533    // 0x060  srl   srl   0xFFFFFFFF>>5
+42a2a023    // 0x064  sw   x10, 0x420  srl   0xFFFFFFFF>>5
+4013d533    // 0x068  sra   sra   0xFFFFFFFF>>>5
+42a2a223    // 0x06c  sw   x10, 0x424  sra   0xFFFFFFFF>>>5
+00009533    // 0x070  sll   sll   移位 0
+42a2a423    // 0x074  sw   x10, 0x428  sll   移位 0
+00112533    // 0x078  slt   slt   -5 < 5
+42a2a623    // 0x07c  sw   x10, 0x42c  slt   -5 < 5
+0020a533    // 0x080  slt   slt   5 < -5
+42a2a823    // 0x084  sw   x10, 0x430  slt   5 < -5
+0041a533    // 0x088  slt   slt   INT_MIN < INT_MAX
+42a2aa23    // 0x08c  sw   x10, 0x434  slt   INT_MIN < INT_MAX
+00322533    // 0x090  slt   slt   INT_MAX < INT_MIN
+42a2ac23    // 0x094  sw   x10, 0x438  slt   INT_MAX < INT_MIN
+00113533    // 0x098  sltu  sltu  0xFFFFFFFB < 5
+42a2ae23    // 0x09c  sw   x10, 0x43c  sltu  0xFFFFFFFB < 5
+0020b533    // 0x0a0  sltu  sltu  5 < 0xFFFFFFFB
+44a2a023    // 0x0a4  sw   x10, 0x440  sltu  5 < 0xFFFFFFFB
+0041b533    // 0x0a8  sltu  sltu  无符号边界 1
+44a2a223    // 0x0ac  sw   x10, 0x444  sltu  无符号边界 1
+00323533    // 0x0b0  sltu  sltu  无符号边界 2
+44a2a423    // 0x0b4  sw   x10, 0x448  sltu  无符号边界 2
+00734533    // 0x0b8  xor   xor   与全 1 异或
+44a2a623    // 0x0bc  sw   x10, 0x44c  xor   与全 1 异或
+00034533    // 0x0c0  xor   xor   与 x0 异或
+44a2a823    // 0x0c4  sw   x10, 0x450  xor   与 x0 异或
+00736533    // 0x0c8  or    or    与全 1 或
+44a2aa23    // 0x0cc  sw   x10, 0x454  or    与全 1 或
+0020e533    // 0x0d0  or    or    5 | -5
+44a2ac23    // 0x0d4  sw   x10, 0x458  or    5 | -5
+00737533    // 0x0d8  and   and   与全 1 与
+44a2ae23    // 0x0dc  sw   x10, 0x45c  and   与全 1 与
+00337533    // 0x0e0  and   and   无公共位
+46a2a023    // 0x0e4  sw   x10, 0x460  and   无公共位
+
+// === I 型：addi / slti / sltiu / xori / ori / andi / slli / srli / srai ===
+7ff00513    // 0x0e8  addi  addi  立即数上界 2047
+46a2a223    // 0x0ec  sw   x10, 0x464  addi  立即数上界 2047
+80000513    // 0x0f0  addi  addi  立即数下界 -2048
+46a2a423    // 0x0f4  sw   x10, 0x468  addi  立即数下界 -2048
+00138513    // 0x0f8  addi  addi  0xFFFFFFFF+1 回绕
+46a2a623    // 0x0fc  sw   x10, 0x46c  addi  0xFFFFFFFF+1 回绕
+0050a513    // 0x100  slti  slti  5 < 5
+46a2a823    // 0x104  sw   x10, 0x470  slti  5 < 5
+0060a513    // 0x108  slti  slti  5 < 6
+46a2aa23    // 0x10c  sw   x10, 0x474  slti  5 < 6
+00012513    // 0x110  slti  slti  -5 < 0
+46a2ac23    // 0x114  sw   x10, 0x478  slti  -5 < 0
+0001a513    // 0x118  slti  slti  INT_MIN < 0
+46a2ae23    // 0x11c  sw   x10, 0x47c  slti  INT_MIN < 0
+0050b513    // 0x120  sltiu sltiu 5 < 5
+48a2a023    // 0x124  sw   x10, 0x480  sltiu 5 < 5
+0060b513    // 0x128  sltiu sltiu 5 < 6
+48a2a223    // 0x12c  sw   x10, 0x484  sltiu 5 < 6
+fff13513    // 0x130  sltiu sltiu 立即数符号扩展后无符号比较
+48a2a423    // 0x134  sw   x10, 0x488  sltiu 立即数符号扩展后无符号比较
+fff3b513    // 0x138  sltiu sltiu 与 -1 相等
+48a2a623    // 0x13c  sw   x10, 0x48c  sltiu 与 -1 相等
+fff34513    // 0x140  xori  xori  取反
+48a2a823    // 0x144  sw   x10, 0x490  xori  取反
+0f00c513    // 0x148  xori  xori  低 12 位掩码
+48a2aa23    // 0x14c  sw   x10, 0x494  xori  低 12 位掩码
+0f00e513    // 0x150  ori   ori   置位
+48a2ac23    // 0x154  sw   x10, 0x498  ori   置位
+7ff06513    // 0x158  ori   ori   立即数上界
+48a2ae23    // 0x15c  sw   x10, 0x49c  ori   立即数上界
+0ff37513    // 0x160  andi  andi  取低字节
+4aa2a023    // 0x164  sw   x10, 0x4a0  andi  取低字节
+ff037513    // 0x168  andi  andi  负数立即数
+4aa2a223    // 0x16c  sw   x10, 0x4a4  andi  负数立即数
+00409513    // 0x170  slli  slli  左移 4
+4aa2a423    // 0x174  sw   x10, 0x4a8  slli  左移 4
+01f19513    // 0x178  slli  slli  移出全部位
+4aa2a623    // 0x17c  sw   x10, 0x4ac  slli  移出全部位
+01f1d513    // 0x180  srli  srli  逻辑右移 31
+4aa2a823    // 0x184  sw   x10, 0x4b0  srli  逻辑右移 31
+41f1d513    // 0x188  srai  srai  算术右移 31
+4aa2aa23    // 0x18c  sw   x10, 0x4b4  srai  算术右移 31
+00035513    // 0x190  srli  srli  移位 0
+4aa2ac23    // 0x194  sw   x10, 0x4b8  srli  移位 0
+40035513    // 0x198  srai  srai  移位 0
+4aa2ae23    // 0x19c  sw   x10, 0x4bc  srai  移位 0
+40435513    // 0x1a0  srai  srai  正数算术右移
+4ca2a023    // 0x1a4  sw   x10, 0x4c0  srai  正数算术右移
+
+// === U 型：lui / auipc ===
+deadb537    // 0x1a8  lui   x10, 0xDEADB
+4ca2a223    // 0x1ac  sw   x10, 0x4c4  lui 高 20 位
+00001537    // 0x1b0  lui   x10, 1
+4ca2a423    // 0x1b4  sw   x10, 0x4c8  lui 最小值 1
+00000517    // 0x1b8  auipc x10, 0
+4ca2a623    // 0x1bc  sw   x10, 0x4cc  auipc 取本指令地址
+00001517    // 0x1c0  auipc x10, 1
+4ca2a823    // 0x1c4  sw   x10, 0x4d0  auipc + 0x1000
+fffff517    // 0x1c8  auipc x10, 0xFFFFF
+4ca2aa23    // 0x1cc  sw   x10, 0x4d4  auipc 负偏移
+
+// === 访存：sb / sh / sw 与 lb / lh / lw / lbu / lhu ===
+807f8437    // 0x1d0  lui  x8, 0x807F8
+0ff46413    // 0x1d4  ori  x8, x8, 0xFF     x8 = 0x807F_80FF
+0082a823    // 0x1d8  sw   x8, MEMTEST+0
+01028503    // 0x1dc  lb   x10, MEMTEST+0   lb   @0 符号扩展
+4ca2ac23    // 0x1e0  sw   x10, 0x4d8  lb   @0 符号扩展
+01128503    // 0x1e4  lb   x10, MEMTEST+1   lb   @1 符号扩展
+4ca2ae23    // 0x1e8  sw   x10, 0x4dc  lb   @1 符号扩展
+01228503    // 0x1ec  lb   x10, MEMTEST+2   lb   @2 正字节
+4ea2a023    // 0x1f0  sw   x10, 0x4e0  lb   @2 正字节
+01328503    // 0x1f4  lb   x10, MEMTEST+3   lb   @3 符号扩展
+4ea2a223    // 0x1f8  sw   x10, 0x4e4  lb   @3 符号扩展
+0102c503    // 0x1fc  lbu  x10, MEMTEST+0   lbu  @0 零扩展
+4ea2a423    // 0x200  sw   x10, 0x4e8  lbu  @0 零扩展
+0112c503    // 0x204  lbu  x10, MEMTEST+1   lbu  @1 零扩展
+4ea2a623    // 0x208  sw   x10, 0x4ec  lbu  @1 零扩展
+0132c503    // 0x20c  lbu  x10, MEMTEST+3   lbu  @3 零扩展
+4ea2a823    // 0x210  sw   x10, 0x4f0  lbu  @3 零扩展
+01029503    // 0x214  lh   x10, MEMTEST+0   lh   @0 符号扩展
+4ea2aa23    // 0x218  sw   x10, 0x4f4  lh   @0 符号扩展
+01229503    // 0x21c  lh   x10, MEMTEST+2   lh   @2 符号扩展
+4ea2ac23    // 0x220  sw   x10, 0x4f8  lh   @2 符号扩展
+0102d503    // 0x224  lhu  x10, MEMTEST+0   lhu  @0 零扩展
+4ea2ae23    // 0x228  sw   x10, 0x4fc  lhu  @0 零扩展
+0122d503    // 0x22c  lhu  x10, MEMTEST+2   lhu  @2 零扩展
+50a2a023    // 0x230  sw   x10, 0x500  lhu  @2 零扩展
+0102a503    // 0x234  lw   x10, MEMTEST+0
+50a2a223    // 0x238  sw   x10, 0x504  lw 整字
+0ff0000f    // 0x23c  fence                访存次序提示（顺序流水线）
+112234b7    // 0x240  lui  x9, 0x11223
+3444e493    // 0x244  ori  x9, x9, 0x344    x9 = 0x1122_3344
+0092ac23    // 0x248  sw   x9, MEMTEST+8
+0182a503    // 0x24c  lw   x10, MEMTEST+8
+50a2a423    // 0x250  sw   x10, 0x508  sw 整字回读
+0aa00613    // 0x254  addi x12, x0, 0xAA
+00c28ca3    // 0x258  sb   x12, MEMTEST+9   只改 lane1
+0182a503    // 0x25c  lw   x10, MEMTEST+8
+50a2a623    // 0x260  sw   x10, 0x50c  sb 只改目标通道
+00c28da3    // 0x264  sb   x12, MEMTEST+11  改 lane3
+0182a503    // 0x268  lw   x10, MEMTEST+8
+50a2a823    // 0x26c  sw   x10, 0x510  sb 最高字节
+7bc00693    // 0x270  addi x13, x0, 0x7BC
+00d29d23    // 0x274  sh   x13, MEMTEST+10  只改高半字
+0182a503    // 0x278  lw   x10, MEMTEST+8
+50a2aa23    // 0x27c  sw   x10, 0x514  sh 只改目标半字
+0102a703    // 0x280  lw   x14, MEMTEST+0   load-use
+00e70533    // 0x284  add  x10, x14, x14   紧随 load 使用
+50a2ac23    // 0x288  sw   x10, 0x518  load-use 前递
+0182a703    // 0x28c  lw   x14, MEMTEST+8
+0102a783    // 0x290  lw   x15, MEMTEST+0   背靠背
+00f74533    // 0x294  xor  x10, x14, x15   同时依赖两条 load
+50a2ae23    // 0x298  sw   x10, 0x51c  背靠背 load
+
+// === 分支：beq / bne / blt / bge / bltu / bgeu（跳与不跳 + 边界）===
+00000593    // 0x29c  addi x11, x0, 0       结果槽 = 0
+00108463    // 0x2a0  beq  x1, x1      beq  相等 -> 跳
+0080006f    // 0x2a4  jal  x0, <after>      未跳则跳过奖励
+00100593    // 0x2a8  addi x11, x0, 1       结果槽 = 1
+52b2a023    // 0x2ac  sw   x11, 0x520  beq  相等 -> 跳
+00000593    // 0x2b0  addi x11, x0, 0       结果槽 = 0
+00608463    // 0x2b4  beq  x1, x6      beq  不等 -> 不跳
+0080006f    // 0x2b8  jal  x0, <after>      未跳则跳过奖励
+00100593    // 0x2bc  addi x11, x0, 1       结果槽 = 1
+52b2a223    // 0x2c0  sw   x11, 0x524  beq  不等 -> 不跳
+00000593    // 0x2c4  addi x11, x0, 0       结果槽 = 0
+00609463    // 0x2c8  bne  x1, x6      bne  不等 -> 跳
+0080006f    // 0x2cc  jal  x0, <after>      未跳则跳过奖励
+00100593    // 0x2d0  addi x11, x0, 1       结果槽 = 1
+52b2a423    // 0x2d4  sw   x11, 0x528  bne  不等 -> 跳
+00000593    // 0x2d8  addi x11, x0, 0       结果槽 = 0
+00109463    // 0x2dc  bne  x1, x1      bne  相等 -> 不跳
+0080006f    // 0x2e0  jal  x0, <after>      未跳则跳过奖励
+00100593    // 0x2e4  addi x11, x0, 1       结果槽 = 1
+52b2a623    // 0x2e8  sw   x11, 0x52c  bne  相等 -> 不跳
+00000593    // 0x2ec  addi x11, x0, 0       结果槽 = 0
+00114463    // 0x2f0  blt  x2, x1      blt  -5 < 5 -> 跳
+0080006f    // 0x2f4  jal  x0, <after>      未跳则跳过奖励
+00100593    // 0x2f8  addi x11, x0, 1       结果槽 = 1
+52b2a823    // 0x2fc  sw   x11, 0x530  blt  -5 < 5 -> 跳
+00000593    // 0x300  addi x11, x0, 0       结果槽 = 0
+0020c463    // 0x304  blt  x1, x2      blt  5 < -5 -> 不跳
+0080006f    // 0x308  jal  x0, <after>      未跳则跳过奖励
+00100593    // 0x30c  addi x11, x0, 1       结果槽 = 1
+52b2aa23    // 0x310  sw   x11, 0x534  blt  5 < -5 -> 不跳
+00000593    // 0x314  addi x11, x0, 0       结果槽 = 0
+0041c463    // 0x318  blt  x3, x4      blt  有符号边界 INT_MIN < INT_MAX
+0080006f    // 0x31c  jal  x0, <after>      未跳则跳过奖励
+00100593    // 0x320  addi x11, x0, 1       结果槽 = 1
+52b2ac23    // 0x324  sw   x11, 0x538  blt  有符号边界 INT_MIN < INT_MAX
+00000593    // 0x328  addi x11, x0, 0       结果槽 = 0
+0020d463    // 0x32c  bge  x1, x2      bge  5 >= -5 -> 跳
+0080006f    // 0x330  jal  x0, <after>      未跳则跳过奖励
+00100593    // 0x334  addi x11, x0, 1       结果槽 = 1
+52b2ae23    // 0x338  sw   x11, 0x53c  bge  5 >= -5 -> 跳
+00000593    // 0x33c  addi x11, x0, 0       结果槽 = 0
+00115463    // 0x340  bge  x2, x1      bge  -5 >= 5 -> 不跳
+0080006f    // 0x344  jal  x0, <after>      未跳则跳过奖励
+00100593    // 0x348  addi x11, x0, 1       结果槽 = 1
+54b2a023    // 0x34c  sw   x11, 0x540  bge  -5 >= 5 -> 不跳
+00000593    // 0x350  addi x11, x0, 0       结果槽 = 0
+00325463    // 0x354  bge  x4, x3      bge  有符号边界 INT_MAX >= INT_MIN
+0080006f    // 0x358  jal  x0, <after>      未跳则跳过奖励
+00100593    // 0x35c  addi x11, x0, 1       结果槽 = 1
+54b2a223    // 0x360  sw   x11, 0x544  bge  有符号边界 INT_MAX >= INT_MIN
+00000593    // 0x364  addi x11, x0, 0       结果槽 = 0
+0020e463    // 0x368  bltu x1, x2      bltu 无符号 5 < 0xFFFFFFFB
+0080006f    // 0x36c  jal  x0, <after>      未跳则跳过奖励
+00100593    // 0x370  addi x11, x0, 1       结果槽 = 1
+54b2a423    // 0x374  sw   x11, 0x548  bltu 无符号 5 < 0xFFFFFFFB
+00000593    // 0x378  addi x11, x0, 0       结果槽 = 0
+00116463    // 0x37c  bltu x2, x1      bltu 无符号 0xFFFFFFFB < 5 -> 不跳
+0080006f    // 0x380  jal  x0, <after>      未跳则跳过奖励
+00100593    // 0x384  addi x11, x0, 1       结果槽 = 1
+54b2a623    // 0x388  sw   x11, 0x54c  bltu 无符号 0xFFFFFFFB < 5 -> 不跳
+00000593    // 0x38c  addi x11, x0, 0       结果槽 = 0
+00326463    // 0x390  bltu x4, x3      bltu 无符号边界
+0080006f    // 0x394  jal  x0, <after>      未跳则跳过奖励
+00100593    // 0x398  addi x11, x0, 1       结果槽 = 1
+54b2a823    // 0x39c  sw   x11, 0x550  bltu 无符号边界
+00000593    // 0x3a0  addi x11, x0, 0       结果槽 = 0
+00117463    // 0x3a4  bgeu x2, x1      bgeu 无符号 >= 5
+0080006f    // 0x3a8  jal  x0, <after>      未跳则跳过奖励
+00100593    // 0x3ac  addi x11, x0, 1       结果槽 = 1
+54b2aa23    // 0x3b0  sw   x11, 0x554  bgeu 无符号 >= 5
+00000593    // 0x3b4  addi x11, x0, 0       结果槽 = 0
+0020f463    // 0x3b8  bgeu x1, x2      bgeu 无符号 5 >= 0xFFFFFFFB -> 不跳
+0080006f    // 0x3bc  jal  x0, <after>      未跳则跳过奖励
+00100593    // 0x3c0  addi x11, x0, 1       结果槽 = 1
+54b2ac23    // 0x3c4  sw   x11, 0x558  bgeu 无符号 5 >= 0xFFFFFFFB -> 不跳
+00000593    // 0x3c8  addi x11, x0, 0       结果槽 = 0
+0041f463    // 0x3cc  bgeu x3, x4      bgeu 无符号边界
+0080006f    // 0x3d0  jal  x0, <after>      未跳则跳过奖励
+00100593    // 0x3d4  addi x11, x0, 1       结果槽 = 1
+54b2ae23    // 0x3d8  sw   x11, 0x55c  bgeu 无符号边界
+
+// === 跳转：jal（前向/后向、带/不带链接）/ jalr（目标/链接/&~1 对齐）===
+00000593    // 0x3dc  addi x11, x0, 0
+0080006f    // 0x3e0  jal  x0, j1_ok        前向跳转
+7ff00593    // 0x3e4  addi x11, x0, 0x7FF   不该执行
+00100593    // 0x3e8  addi x11, x0, 1
+56b2a023    // 0x3ec  sw   x11, 0x560  jal 前向跳转
+008006ef    // 0x3f0  jal  x13, j2_ok       带链接
+7ff00593    // 0x3f4  addi x11, x0, 0x7FF   不该执行
+56d2a223    // 0x3f8  sw   x13, 0x564  jal 链接值 pc+4
+00000813    // 0x3fc  addi x16, x0, 0       计数
+00000893    // 0x400  addi x17, x0, 0       迭代变量
+00180813    // 0x404  addi x16, x16, 1      ← 循环目标（非幂等）
+00188893    // 0x408  addi x17, x17, 1
+00300913    // 0x40c  addi x18, x0, 3
+ff289ae3    // 0x410  bne  x17, x18, j3_loop  后向分支循环
+5702a423    // 0x414  sw   x16, 0x568  后向分支循环 3 次
+42800613    // 0x418  addi x12, x0, <target>
+000606e7    // 0x41c  jalr x13, 0(x12)       跳到 target
+7ff00593    // 0x420  addi x11, x0, 0x7FF   不该执行
+7ff00593    // 0x424  addi x11, x0, 0x7FF   不该执行
+7ff00593    // 0x428  addi x11, x0, 0x7FF   不该执行
+56d2a623    // 0x42c  sw   x13, 0x56c  jalr 链接值 pc+4
+44500613    // 0x430  addi x12, x0, <target+1>  最低位 = 1
+00060767    // 0x434  jalr x14, 0(x12)       必须把最低位清零
+7ff00593    // 0x438  addi x11, x0, 0x7FF   不该执行
+7ff00593    // 0x43c  addi x11, x0, 0x7FF   不该执行
+7ff00593    // 0x440  addi x11, x0, 0x7FF   不该执行
+7ff00593    // 0x444  addi x11, x0, 0x7FF   不该执行
+00100593    // 0x448  addi x11, x0, 1        落在对齐后的目标
+56b2a823    // 0x44c  sw   x11, 0x570  jalr 目标 &~1 对齐
+45c00613    // 0x450  addi x12, x0, <target-8>
+008607e7    // 0x454  jalr x15, 8(x12)       目标 = rs1+imm
+7ff00593    // 0x458  addi x11, x0, 0x7FF   不该执行
+7ff00593    // 0x45c  addi x11, x0, 0x7FF   不该执行
+7ff00593    // 0x460  addi x11, x0, 0x7FF   不该执行
+00000593    // 0x464  addi x11, x0, 0
+00100593    // 0x468  addi x11, x0, 1        落在 rs1+imm 目标
+56b2aa23    // 0x46c  sw   x11, 0x574  jalr 目标 rs1+imm
+00000993    // 0x470  addi x19, x0, 0        计数
+00100a93    // 0x474  addi x21, x0, 1        比较值
+00198993    // 0x478  addi x19, x19, 1      ← jalr 后向目标
+01599663    // 0x47c  bne  x19, x21, j4_after   第二次经过时跳出
+47800613    // 0x480  addi x12, x0, <j4_loop>
+00060067    // 0x484  jalr x0, 0(x12)        后向跳回
+5732ac23    // 0x488  sw   x19, 0x578  jalr 后向跳转 2 次
+
+// === CSR 指令自测（Zicsr 六种形式 + misa 只读）===
+00001c37    // 0x48c  lui  x24, 0x00001      x24 = 0x1234
+234c0c13    // 0x490  addi x24, x24, 564   x24 = 0x1234
+340c1cf3    // 0x494  csrrw x25, mscratch, x24  写 0x1234，x25=旧值
+2192a023    // 0x498  sw   x25, 0x200  csrrw 读到旧值
+34002c73    // 0x49c  csrrs x24, mscratch, x0   读回 0x1234（不写）
+2182a223    // 0x4a0  sw   x24, 0x204  csrrs 读回值
+340fdd73    // 0x4a4  csrrwi x26, mscratch, 31  mscratch=31，x26=旧值
+21a2a423    // 0x4a8  sw   x26, 0x208  csrrwi 读到旧值
+30102ef3    // 0x4ac  csrrs x29, misa, x0      misa 只读
+21d2a623    // 0x4b0  sw   x29, 0x20c  misa 只读值
+340c3f73    // 0x4b4  csrrc x30, mscratch, x24  mscratch &= ~x24，x30=旧值
+21e2a823    // 0x4b8  sw   x30, 0x210  csrrc 读到旧值
+3400ee73    // 0x4bc  csrrsi x28, mscratch, 1   mscratch |= 1，x28=旧值
+21c2aa23    // 0x4c0  sw   x28, 0x214  csrrsi 读到旧值
+3400fdf3    // 0x4c4  csrrci x27, mscratch, 1   mscratch &= ~1，x27=旧值
+21b2ac23    // 0x4c8  sw   x27, 0x218  csrrci 读到旧值
+34002e73    // 0x4cc  csrrs x28, mscratch, x0   读回最终值
+21c2ae23    // 0x4d0  sw   x28, 0x21c  mscratch 最终值
+34102d73    // 0x4d4  csrrs x26, mepc, x0      mepc 复位值
+23a2a023    // 0x4d8  sw   x26, 0x220  mepc 复位值
+34001073    // 0x4dc  csrrw x0, mscratch, x0   清 mscratch
+
+// === 异常：ECALL / EBREAK / 非法指令 / 非对齐访存 ===
+00000b93    // 0x4e0  addi x23, x0, 0
+240b8b93    // 0x4e4  addi x23, x23, 576   记录指针 = 陷阱记录区
+2972a023    // 0x4e8  sw   x23, TRAP_PTR
+00000b93    // 0x4ec  addi x23, x0, 0
+2972a223    // 0x4f0  sw   x23, IRQ_FLAG   清中断标志
+55800c13    // 0x4f4  addi x24, x0, 1368          mtvec = 处理程序入口
+00000013    // 0x4f8  nop                     （地址小于 0x1000，无需 lui）
+305c1073    // 0x4fc  csrrw x0, mtvec, x24  设置陷阱向量
+00000073    // 0x500  ecall                  ★ 陷阱 1：mcause=11
+00100073    // 0x504  ebreak                 ★ 陷阱 2：mcause=3
+00000000    // 0x508  ? 非法指令 0x0000_0000  ★ 陷阱 3：mcause=2
+0022ac83    // 0x50c  lw   x25, 2(x5)       ★ 陷阱 4：load 非对齐 mcause=4
+0192a123    // 0x510  sw   x25, 2(x5)       ★ 陷阱 5：store 非对齐 mcause=6
+
+// === 定时器中断 ===
+20000c37    // 0x514  lui  x24, 0x20000      TIMER 基址
+00500c93    // 0x518  addi x25, x0, 5       很短的重载值
+019c2023    // 0x51c  sw   x25, 0(x24)      TIMER.LOAD = 5
+00300c93    // 0x520  addi x25, x0, 3      EN | IRQ_EN
+019c2423    // 0x524  sw   x25, 8(x24)      TIMER.CTRL = 3
+08000c13    // 0x528  addi x24, x0, 0x80    mie.MTIE
+304c1073    // 0x52c  csrrw x0, mie, x24    开定时器中断
+00800c13    // 0x530  addi x24, x0, 8       mstatus.MIE
+300c1073    // 0x534  csrrw x0, mstatus, x24 开全局中断
+2842ac83    // 0x538  lw   x25, IRQ_FLAG    查询中断标志
+fe0c8ee3    // 0x53c  beq  x25, x0, irq_loop  ← 中断在这里被受理
+30001073    // 0x540  csrrw x0, mstatus, x0 关中断
+20000c37    // 0x544  lui  x24, 0x20000      TIMER 基址
+000c2423    // 0x548  sw   x0, 8(x24)       TIMER.CTRL = 0
+00100c93    // 0x54c  addi x25, x0, 1
+019c2623    // 0x550  sw   x25, 0x0C(x24)   STATUS 写 1 清溢出
+0500006f    // 0x554  jal  x0, trap_done     跳过陷阱处理程序
+340e9ef3    // 0x558  csrrw x29, mscratch, x29  保存 x29
+34202e73    // 0x55c  csrrs x28, mcause, x0      x28 = mcause
+34102df3    // 0x560  csrrs x27, mepc, x0        x27 = mepc
+2802ad03    // 0x564  lw   x26, TRAP_PTR
+01cd2023    // 0x568  sw   x28, 0(x26)          记录 mcause
+01bd2223    // 0x56c  sw   x27, 4(x26)          记录 mepc
+008d0d13    // 0x570  addi x26, x26, 8
+29a2a023    // 0x574  sw   x26, TRAP_PTR        指针 +8
+000e5e63    // 0x578  bge  x28, x0, h_sync      非负（同步异常）→ h_sync；否则中断路径
+00100d13    // 0x57c  addi x26, x0, 1
+29a2a223    // 0x580  sw   x26, IRQ_FLAG        置中断标志
+20000d37    // 0x584  lui  x26, 0x20000      TIMER 基址
+00100d93    // 0x588  addi x27, x0, 1
+01bd2623    // 0x58c  sw   x27, 0x0C(x26)      STATUS 写 1 清溢出
+00c0006f    // 0x590  jal  x0, h_ret
+004d8d93    // 0x594  addi x27, x27, 4          跳过出错指令
+341d9073    // 0x598  csrrw x0, mepc, x27
+340e9ef3    // 0x59c  csrrw x29, mscratch, x29  恢复 x29
+30200073    // 0x5a0  mret
+
+// === 外设：UART 发 "OK\n" / GPIO 回环 / TIMER 溢出轮询 ===
+200005b7    // 0x5a4  lui  x11, 0x20000     x11 = 0x2000_0000
+40058593    // 0x5a8  addi x11, x11, 0x400  +0x400
+40058593    // 0x5ac  addi x11, x11, 0x400  x11 = UART 基址
+36300613    // 0x5b0  addi x12, x0, 867     BAUD = 867
+00c5a623    // 0x5b4  sw   x12, 0x0C(x11)   UART.BAUD
+00000613    // 0x5b8  addi x12, x0, 0
+0085a683    // 0x5bc  lw   x13, 8(x11)      UART.STATUS
+0016f693    // 0x5c0  andi x13, x13, 1      TX_BUSY
+fe069ce3    // 0x5c4  bne  x13, x0, -8      忙则等
+04f00693    // 0x5c8  addi x13, x0, 'O'
+00d5a023    // 0x5cc  sw   x13, 0(x11)      发 'O'
+00000013    // 0x5d0  nop                   等 TX_BUSY 置起
+00000013    // 0x5d4  nop
+00000013    // 0x5d8  nop
+00000013    // 0x5dc  nop
+0085a683    // 0x5e0  lw   x13, 8(x11)
+0016f693    // 0x5e4  andi x13, x13, 1
+fe069ce3    // 0x5e8  bne  x13, x0, -8
+04b00693    // 0x5ec  addi x13, x0, 'K'
+00d5a023    // 0x5f0  sw   x13, 0(x11)      发 'K'
+00000013    // 0x5f4  nop
+00000013    // 0x5f8  nop
+00000013    // 0x5fc  nop
+00000013    // 0x600  nop
+0085a683    // 0x604  lw   x13, 8(x11)
+0016f693    // 0x608  andi x13, x13, 1
+fe069ce3    // 0x60c  bne  x13, x0, -8
+00a00693    // 0x610  addi x13, x0, '\n'
+00d5a023    // 0x614  sw   x13, 0(x11)      发 '\n'
+00000013    // 0x618  nop
+00000013    // 0x61c  nop
+40058713    // 0x620  addi x14, x11, 0x400  GPIO 基址
+0ff00793    // 0x624  addi x15, x0, 0xFF
+00f72223    // 0x628  sw   x15, 4(x14)      GPIO.DIR = 0xFF
+05a00793    // 0x62c  addi x15, x0, 0x5A
+00f72023    // 0x630  sw   x15, 0(x14)      GPIO.DATA = 0x5A
+00072783    // 0x634  lw   x15, 0(x14)      回环读回
+80058a13    // 0x638  addi x20, x11, -0x800 TIMER 基址
+0c800793    // 0x63c  addi x15, x0, 200
+00fa2023    // 0x640  sw   x15, 0(x20)      TIMER.LOAD = 200
+00300a93    // 0x644  addi x21, x0, 3       EN | IRQ_EN
+015a2423    // 0x648  sw   x21, 8(x20)      TIMER.CTRL = 3
+00ca2a83    // 0x64c  lw   x21, 0x0C(x20)   TIMER.STATUS
+001afa93    // 0x650  andi x21, x21, 1      OVERFLOW
+fe0a8ce3    // 0x654  beq  x21, x0, -8      轮询溢出
+00100713    // 0x658  addi x14, x0, 1
+00ea2623    // 0x65c  sw   x14, 0x0C(x20)   写 1 清 OVERFLOW
+
+// === 半字自检 + RESULT + DONE ===
+00100313    // 0x660  addi x6, x0, 1        通过标志
+10000eb7    // 0x664  lui  x29, 0x10000
+300e8e93    // 0x668  addi x29, x29, 0x300  x29 = RAM+0x300
+0000ce37    // 0x66c  lui  x28, 0xC
+eefe0e13    // 0x670  addi x28, x28, -0x111 x28 = 0xBEEF
+01ce9023    // 0x674  sh   x28, 0(x29)      RAM[0x300] = 0xBEEF
+000eaf03    // 0x678  lw   x30, 0(x29)
+000edf83    // 0x67c  lhu  x31, 0(x29)
+bef00e93    // 0x680  addi x29, x0, -0x411
+00000f13    // 0x684  addi x30, x0, 0
+01df9463    // 0x688  bne  x31, x29, +8     半字读对则跳过
+00000313    // 0x68c  addi x6, x0, 0        ★ 半字读错：置失败
+0062a023    // 0x690  sw   x6, RESULT
+600d23b7    // 0x694  lui  x7, 0x600D2      x7 = 0x600D_2000
+eaf38393    // 0x698  addi x7, x7, -0x151   x7 = 0x600D_1EAF
+0072a223    // 0x69c  sw   x7, DONE
+0000006f    // 0x6a0  jal  x0, 0            ★ 挂死点

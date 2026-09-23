@@ -157,60 +157,11 @@
 `define WB_ALU 2'b00
 `define WB_MEM 2'b01
 `define WB_PC4 2'b10    // 写回PC+4（JAL/JALR）
-`define WB_CSR 2'b11    // 写回 CSR 读出的旧值（Zicsr）
 
 // mem size
 `define MSZ_B 2'b00
 `define MSZ_H 2'b01
 `define MSZ_W 2'b10
-
-// --------------------
-// Zicsr / 机器模式 CSR（M-mode）
-//   实现的寄存器（RV32I + Zicsr 最小集）：
-//     mstatus 0x300  mie 0x304  mtvec 0x305  mscratch 0x340
-//     mepc    0x341  mcause 0x342  mtval 0x343（只读 0）  mip 0x344（只读）
-//     misa    0x301（只读，MXL=1 + I 扩展）
-// --------------------
-`define CSR_MSTATUS  12'h300
-`define CSR_MISA     12'h301
-`define CSR_MIE      12'h304
-`define CSR_MTVEC    12'h305
-`define CSR_MSCRATCH 12'h340
-`define CSR_MEPC     12'h341
-`define CSR_MCAUSE   12'h342
-`define CSR_MTVAL    12'h343
-`define CSR_MIP      12'h344
-
-// mstatus 位
-`define MSTATUS_MIE   3
-`define MSTATUS_MPIE  7
-`define MSTATUS_MPP   12:11
-
-// mie / mip 位（当前只实现机器定时器中断）
-`define MIE_MTIE 7
-`define MIP_MTIP 7
-
-// CSR 指令（opcode 0x73, funct3 != 0）
-`define INST_TYPE_ZICSR 7'b1110011
-`define CSR_OP_RW  3'b001
-`define CSR_OP_RS  3'b010
-`define CSR_OP_RC  3'b011
-`define CSR_OP_RWI 3'b101
-`define CSR_OP_RSI 3'b110
-`define CSR_OP_RCI 3'b111
-// SYSTEM 指令（opcode 0x73, funct3 == 0）
-`define INST_MRET 32'h3020_0073
-
-// --------------------
-// 异常 / 中断 cause（mcause）
-// --------------------
-`define CAUSE_INSTR_MISALIGN  32'd0    // 取指地址非 4 字节对齐
-`define CAUSE_ILLEGAL_INSTR   32'd2    // 非法指令（含非法 CSR 访问）
-`define CAUSE_BREAKPOINT      32'd3    // EBREAK
-`define CAUSE_LOAD_MISALIGN   32'd4    // load 地址非对齐
-`define CAUSE_STORE_MISALIGN  32'd6    // store 地址非对齐
-`define CAUSE_ECALL_M         32'd11   // 环境调用（M 模式）
-`define CAUSE_IRQ_M_TIMER     32'h8000_0007   // 机器定时器中断
 
 // -----------------------------------------------------------
 // Registers Address Map

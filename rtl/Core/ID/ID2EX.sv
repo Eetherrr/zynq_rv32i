@@ -44,6 +44,14 @@ module ID2EX (
     input  wire              id_ecall,
     input  wire              id_ebreak,
     input  wire              id_fence,
+    // Zicsr / 陷阱返回
+    input  wire              id_csr_en,
+    input  wire [      2:0]  id_csr_op,
+    input  wire [     11:0]  id_csr_addr,
+    input  wire              id_csr_imm,
+    input  wire [      4:0]  id_csr_uimm,
+    input  wire              id_csr_we,
+    input  wire              id_mret,
 
     // ---------- 输出到 EX ----------
     output logic [`DATA_BUS] id_ex_pc,
@@ -70,7 +78,20 @@ module ID2EX (
     output logic             id_ex_illegal,
     output logic             id_ex_ecall,
     output logic             id_ex_ebreak,
-    output logic             id_ex_fence
+    output logic             id_ex_fence,
+
+    // Zicsr / 陷阱返回
+    output logic             id_ex_csr_en,
+    output logic [      2:0] id_ex_csr_op,
+    output logic [     11:0] id_ex_csr_addr,
+    output logic             id_ex_csr_imm,
+    output logic [      4:0] id_ex_csr_uimm,
+    output logic             id_ex_csr_we,
+    output logic             id_ex_mret,
+
+    // 该级是否是「真实指令」（0 = 冲刷出来的气泡）
+    //   中断只在真实指令上受理，否则 mepc 会记到气泡的 PC(=0) 上
+    output logic             id_ex_valid
 );
 
     always @(posedge clk_sys or negedge rst_sys) begin
@@ -101,6 +122,14 @@ module ID2EX (
             id_ex_ecall         <= `FALSE;
             id_ex_ebreak        <= `FALSE;
             id_ex_fence         <= `FALSE;
+            id_ex_csr_en        <= `FALSE;
+            id_ex_csr_op        <= `CSR_OP_RW;
+            id_ex_csr_addr      <= 12'b0;
+            id_ex_csr_imm       <= `FALSE;
+            id_ex_csr_uimm      <= 5'b0;
+            id_ex_csr_we        <= `FALSE;
+            id_ex_mret          <= `FALSE;
+            id_ex_valid         <= `FALSE;
         end
         else if (flush) begin
             // ---------------- 清空为 NOP ----------------
@@ -129,6 +158,14 @@ module ID2EX (
             id_ex_ecall         <= `FALSE;
             id_ex_ebreak        <= `FALSE;
             id_ex_fence         <= `FALSE;
+            id_ex_csr_en        <= `FALSE;
+            id_ex_csr_op        <= `CSR_OP_RW;
+            id_ex_csr_addr      <= 12'b0;
+            id_ex_csr_imm       <= `FALSE;
+            id_ex_csr_uimm      <= 5'b0;
+            id_ex_csr_we        <= `FALSE;
+            id_ex_mret          <= `FALSE;
+            id_ex_valid         <= `FALSE;
         end
         else if (!stall) begin
             // ---------------- 正常流水 ----------------
@@ -157,6 +194,14 @@ module ID2EX (
             id_ex_ecall         <= id_ecall;
             id_ex_ebreak        <= id_ebreak;
             id_ex_fence         <= id_fence;
+            id_ex_csr_en        <= id_csr_en;
+            id_ex_csr_op        <= id_csr_op;
+            id_ex_csr_addr      <= id_csr_addr;
+            id_ex_csr_imm       <= id_csr_imm;
+            id_ex_csr_uimm      <= id_csr_uimm;
+            id_ex_csr_we        <= id_csr_we;
+            id_ex_mret          <= id_mret;
+            id_ex_valid         <= `TRUE;
         end
     end
 

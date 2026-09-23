@@ -26,6 +26,10 @@ module tb_decoder;
     logic             branch;
     logic [      2:0] br_sel;
     logic             jump, jump_reg, illegal, ecall, ebreak, fence;
+    logic             csr_en, csr_imm, csr_we, mret;
+    logic [      2:0] csr_op;
+    logic [     11:0] csr_addr;
+    logic [      4:0] csr_uimm;
 
     Decoder u_dut (
         .instr        (instr),
@@ -49,7 +53,14 @@ module tb_decoder;
         .illegal      (illegal),
         .ecall        (ecall),
         .ebreak       (ebreak),
-        .fence        (fence)
+        .fence        (fence),
+        .csr_en       (csr_en),
+        .csr_op       (csr_op),
+        .csr_addr     (csr_addr),
+        .csr_imm      (csr_imm),
+        .csr_uimm     (csr_uimm),
+        .csr_we       (csr_we),
+        .mret         (mret)
     );
 
     // ---- 指令构造 ----
@@ -328,9 +339,52 @@ module tb_decoder;
         instr = 32'h0000_100f; #1;             // fence.i (funct3=001)
         chk1("fence.i", fence, 1'b1);
 
-        // 非法 SYSTEM funct3
-        instr = 32'h0000_1073; #1;             // funct3=001
-        chk1("非法 SYSTEM funct3 -> illegal", illegal, 1'b1);
+        // Zicsr：funct3 != 0 都是合法的 CSR 指令
+        $display("\n-- Zicsr（CSRRW/S/C + 立即数形式）--");
+
+        instr = enc_i(12'h300, 2, 3'b001, 1, 7'b1110011); #1;   // csrrw x1, mstatus, x2
+        chk1("csrrw: csr_en", csr_en, 1'b1);
+        chk1("csrrw: csr_op = RW", csr_op == `CSR_OP_RW, 1'b1);
+        chk1("csrrw: csr_addr = 0x300", csr_addr == `CSR_MSTATUS, 1'b1);
+        chk1("csrrw: 不是立即数形式", csr_imm, 1'b0);
+        chk1("csrrw: 需要写 CSR", csr_we, 1'b1);
+        chk1("csrrw: rd_we", rd_we, 1'b1);
+        chk1("csrrw: rd = x1", rd_addr == 5'd1, 1'b1);
+        chk1("csrrw: wb_sel = WB_CSR", wb_sel == `WB_CSR, 1'b1);
+        chk1("csrrw: illegal = 0", illegal, 1'b0);
+
+        instr = enc_i(12'h305, 3, 3'b010, 0, 7'b1110011); #1;   // csrrs x0, mtvec, x3
+        chk1("csrrs: csr_op = RS", csr_op == `CSR_OP_RS, 1'b1);
+        chk1("csrrs: 需要写 CSR", csr_we, 1'b1);
+
+        instr = enc_i(12'h305, 0, 3'b010, 4, 7'b1110011); #1;   // csrrs x4, mtvec, x0
+        chk1("csrrs rs1=x0: 不写 CSR", csr_we, 1'b0);
+        chk1("csrrs rs1=x0: 仍写 rd", rd_we, 1'b1);
+
+        instr = enc_i(12'h342, 1, 3'b011, 5, 7'b1110011); #1;   // csrrc x5, mcause, x1
+        chk1("csrrc: csr_op = RC", csr_op == `CSR_OP_RC, 1'b1);
+        chk1("csrrc: 需要写 CSR", csr_we, 1'b1);
+
+        instr = enc_i(12'h341, 31, 3'b101, 6, 7'b1110011); #1;  // csrrwi x6, mepc, 31
+        chk1("csrrwi: 立即数形式", csr_imm, 1'b1);
+        chk1("csrrwi: uimm = 31", csr_uimm == 5'd31, 1'b1);
+        chk1("csrrwi: 需要写 CSR", csr_we, 1'b1);
+        chk1("csrrwi: csr_addr = 0x341", csr_addr == `CSR_MEPC, 1'b1);
+
+        instr = enc_i(12'h340, 0, 3'b110, 7, 7'b1110011); #1;   // csrrsi x7, mscratch, 0
+        chk1("csrrsi uimm=0: 不写 CSR", csr_we, 1'b0);
+
+        instr = enc_i(12'h340, 5, 3'b111, 8, 7'b1110011); #1;   // csrrci x8, mscratch, 5
+        chk1("csrrci: csr_op = RCI", csr_op == `CSR_OP_RCI, 1'b1);
+        chk1("csrrci: 需要写 CSR", csr_we, 1'b1);
+
+        // MRET
+        $display("\n-- MRET --");
+        instr = 32'h3020_0073; #1;
+        chk1("mret: mret = 1", mret, 1'b1);
+        chk1("mret: illegal = 0", illegal, 1'b0);
+        chk1("mret: 不写 rd", rd_we, 1'b0);
+        chk1("mret: 非 CSR 指令", csr_en, 1'b0);
 
         // 未知 opcode
         instr = 32'hFFFF_FFFF; #1;

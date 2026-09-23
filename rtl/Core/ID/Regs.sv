@@ -3,25 +3,26 @@
 `include "../../sys_define.svh"
 
 module Regs (
-    input  wire             clk_sys,
-    input  wire             rst_sys,
-    input  wire [`ADDR_BUS] rs1_addr,
-    input  wire [`ADDR_BUS] rs2_addr,
-    output reg  [`DATA_BUS] rs1_data,
-    output reg  [`DATA_BUS] rs2_data,
-    input  wire [`ADDR_BUS] rd_addr,
-    input  wire [`DATA_BUS] rd_data,
-    input  wire             we_flag
-);
+        input  wire             clk_sys,
+        input  wire             rst_sys,
+        input  wire [`ADDR_BUS] rs1_addr,
+        input  wire [`ADDR_BUS] rs2_addr,
+        output reg  [`DATA_BUS] rs1_data,
+        output reg  [`DATA_BUS] rs2_data,
+        input  wire [`ADDR_BUS] rd_addr,
+        input  wire [`DATA_BUS] rd_data,
+        input  wire             we_flag
+    );
 
-    (* ram_style = "block" *) reg [`DATA_BUS] regs [0:`REG_NUM-1];
+    reg [`DATA_BUS] regs [0:`REG_NUM-1];
 
     integer i;
 
     // 同步写
     always @(posedge clk_sys or negedge rst_sys) begin
         if (rst_sys == `RESET_EN) begin
-            for (i = 0; i < `REG_NUM; i = i + 1) regs[i] <= 32'b0;
+            for (i = 0; i < `REG_NUM; i = i + 1)
+                regs[i] <= 32'b0;
         end
         else if (we_flag && rd_addr != `REG_ZERO) begin
             regs[rd_addr] <= rd_data;

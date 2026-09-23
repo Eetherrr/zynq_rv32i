@@ -8,6 +8,7 @@
 //       WB_ALU : ALU 结果
 //       WB_MEM : 加载数据
 //       WB_PC4 : PC + 4 (JAL/JALR)
+//       WB_CSR : CSR 读出的旧值（Zicsr）
 //   - 输出到寄存器堆写端口
 //=====================================================================
 module WB (
@@ -15,6 +16,7 @@ module WB (
     input  wire [`DATA_BUS]  wb_alu_result,
     input  wire [`DATA_BUS]  wb_rdata,
     input  wire [`DATA_BUS]  wb_pc4,
+    input  wire [`DATA_BUS]  wb_csr_rdata,
     input  wire [      1:0]  wb_sel,
     input  wire [`ADDR_BUS]  wb_rd_addr,
     input  wire              wb_rd_we,
@@ -30,6 +32,7 @@ module WB (
             `WB_ALU : rd_data = wb_alu_result;
             `WB_MEM : rd_data = wb_rdata;
             `WB_PC4 : rd_data = wb_pc4;
+            `WB_CSR : rd_data = wb_csr_rdata;
             default : rd_data = 32'b0;
         endcase
     end
