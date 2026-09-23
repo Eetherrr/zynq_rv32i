@@ -25,18 +25,18 @@ CPU 本体采用经典**五级流水线**（IF / ID / EX / MEM / WB），通过�
 
 | 项目 | 说明 |
 | --- | --- |
-| 指令集 | RV32I（不含 M / A / F / D 扩展，CSR 未实现） |
+| 指令集 | RV32I + **Zicsr**（CSR 读写）+ 机器模式异常/中断（MRET）；不含 M / A / F / D 扩展 |
 | 微架构 | 经典五级流水线，顺序发射、顺序写回 |
 | 结构 | **哈佛结构**：指令 ROM 与数据 RAM 分离 |
 | 数据通路 | 32 bit 数据 / 地址，PC 复位向量 `0x0000_0000` |
 | 冒险处理 | 全前递：EX/MEM（load 直接前递数据）+ MEM/WB，**load-use 无需停顿** |
-| 控制转移 | EX 阶段解析分支 / 跳转，重定向并冲刷错误路径 |
+| 控制转移 | EX 阶段解析分支 / 跳转，重定向并冲刷错误路径；异常/中断在 EX 级陷入（mtvec/mepc/mcause），MRET 返回 |
 | 片上总线 | RIB：4 主（用 2 预留 2）+ 6 从，固定优先级仲裁 |
 | 存储器 | **Block Memory Generator IP**：ROM 16 KiB / RAM 64 KiB，读延迟 1 拍（地址在 EX 级提前发起） |
 | 外设 | TIMER / SPI / UART / GPIO（各为独立模块） |
 | 目标器件 | `xc7z010clg400-1`（Zynq-7010，CLG400 封装） |
 | 顶层模块 | `CPU_SOC_top` |
-| 验证状态 | 模块级 10 个测试平台 **420 项** + RIB/外设 **25 项** 全部通过；**SoC 系统级 RV32I 全覆盖 118 项中 105 项通过**（异常记录簿记待收尾，见 [7](#7-当前进度)） |
+| 验证状态 | 模块级 10 个测试平台 **420 项** + RIB/外设 **25 项** + **SoC 系统级 RV32I 40/40 全覆盖 118 项**，全部通过（见 [5.6](#56-验证方式) / [7](#7-当前进度)） |
 | 开发工具 | Vivado 2022.2 + Makefile + Tcl 脚本 |
 
 ---
@@ -65,6 +65,7 @@ zynq_rv32i/
 │   │   ├── ID/               #     Decoder.sv, Regs.sv, ID.sv, ID2EX.sv
 │   │   ├── EX/               #     EX.sv, ALU.sv, Branch.sv, Jump.sv, EX2MEM.sv
 │   │   ├── MEM/              #     MEM_req.sv（EX 级发起访存）, MEM_load.sv（MEM 级取数）, MEM2WB.sv
+│   │   ├── CSR/              #     CSR.sv（CSR 文件 + 陷阱入口 + MRET + 中断挂起）
 │   │   └── WB/               #     WB.sv
 │   ├── Bus/                  #   片上总线
 │   │   ├── RIB_top.sv        #     RIB 顶层（仲裁 + 地址译码 + 从机读回 MUX）
@@ -136,7 +137,7 @@ CPU_SOC_top                     ← 顶层：时钟复位、引脚、外设互�
 | **IF** | `PCReg` / `IF` | 产生 PC，取出指令 | `if_pc`、`if_instr` |
 | **ID** | `Decoder` / `Regs` / `ID` | 译码、读寄存器堆、生成立即数、选操作数 | 全套控制信号、`id_op1` / `id_op2` |
 | **EX** | `EX` / `ALU` / `Branch` / `Jump` | 前递选源、ALU 运算、分支与跳转解析 | `ex_alu_result`、分支/跳转结果与目标 |
-| **EX** | `MEM_req` | **访存请求提前一拍发起**：地址、store 数据对齐、字节使能 | `mem_addr/wdata/be/req/we` |
+| **EX** | `MEM_req` / `CSR` | **访存请求提前一拍发起**（地址、store 数据对齐、字节使能、对齐检查）；CSR 读、陷阱入口与 MRET | `mem_addr/wdata/be/req/we`、`csr_rdata`、`trap_*` |
 | **MEM** | `MEM_load` | 读数据通道提取、符号/零扩展、地址对齐检查 | `mem_rdata_ext`、`mem_align_err` |
 | **WB** | `WB` | 按 `wb_sel` 选择写回源，写寄存器堆 | `wb_wdata` → `Regs` |
 
@@ -362,7 +363,7 @@ CPU 侧与之配套：**访存地址在 EX 级发起**（`MEM_req`），BRAM 的
 | RAW（普通） | EX 级目的寄存器被 ID 级指令使用 | 不停顿，EX/MEM、MEM/WB 前递 |
 | load-use | EX 级是 load 且目的寄存器被 ID 级指令使用 | **不停顿**：访存地址在 EX 级发起，BRAM 1 拍延迟落在 MEM 级，MEM 级组合提取出的 load 数据直接前递给紧随其后的指令（`EX.sv` 的 `ex_mem_load_data`） |
 | 分支/跳转 | EX 级 `branch_taken` 或 `jump_taken` | 冲刷 IF/ID、ID/EX、EX/MEM；`redirect_en` 装载目标 PC |
-| 异常 | EX 级 `illegal` / `ecall` / `ebreak` | 与分支同样冲刷重定向；`exception_en` 置起（异常处理待接入） |
+| 异常 / 中断 | EX 级非法指令 / ECALL / EBREAK / 非对齐访存，或 `mip&mie&mstatus.MIE` | 冲刷 IF/ID、ID/EX、**EX/MEM**（出错指令不写回），重定向到 `mtvec`，同时记录 `mepc`/`mcause` 并关中断；MRET 返回 `mepc` |
 
 - 冲刷下游流水寄存器为 NOP，保证错误路径指令不写回、不访存。
 - WB 级不需要 flush（`flush_mem2wb` 恒 0）。
@@ -611,15 +612,16 @@ BMG 存储器。程序（`tb/prog/gen_cpu_test.py` 生成）为**每条指令**�
 | 访存 8 条 | lb/lh/lw/lbu/lhu × 各字节/半字通道 + sb/sh/sw 通道隔离（回读整字确认邻居不变）、load-use、背靠背 load |
 | 分支 6 条 | beq/bne/blt/bge/bltu/bgeu 各含「跳 / 不跳」与有符号/无符号边界（共 16 个用例） |
 | 跳转 2 条 | jal（前向/后向、带链接 rd≠x0）、jalr（目标、**&~1 对齐**、rs1+imm、后向跳转、链接值） |
-| 其它 | fence（次序提示）、UART 实发 `"OK\n"`、GPIO 回环、TIMER 溢出 |
+| Zicsr 6 条 | csrrw/csrrs/csrrc/csrrwi/csrrsi/csrrci + MRET（读写语义、只读寄存器、同拍前递） |
+| 系统 | fence（次序提示）、**Zicsr 六条 + MRET**、**异常/中断**（ECALL/EBREAK/非法指令/非对齐访存/定时器中断 → 处理程序记录 cause+mepc → MRET 返回）、UART 实发 `"OK\n"`、GPIO 回环、TIMER 溢出 |
 
-**当前：118 项期望值中 105 项通过**（95 个指令结果槽 + CSR 自测全部通过 +
-陷阱/中断的记录项待收尾 + RESULT/DONE + GPIO/TIMER/UART 引脚）。
+**共 118 项期望值全部通过**：95 个指令结果槽 + 8 项 CSR 自测 + 12 项陷阱/中断
+记录（mcause/mepc）+ 陷阱指针 + 中断标志 + RESULT/DONE，另加 GPIO/TIMER/UART 引脚。
 
-> **异常 / 中断已接入**（CSR + 陷阱入口 + MRET）：`tb_csr` / `tb_decoder` /
-> `tb_control` 模块级全绿；系统级已能观察到 ECALL/EBREAK/非法指令/非对齐访存
-> 正确进入处理程序（cause、mepc 正确，MRET 正确返回），但处理程序的
-> **记录簿记（记录指针）**仍有问题，见 7 节「进行中」。
+> **异常 / 中断已完整接入并验证**（CSR + 陷阱入口 + MRET + 定时器中断）：
+> 系统级用例依次触发 ECALL(11) / EBREAK(3) / 非法指令(2) / 非对齐 load(4) /
+> 非对齐 store(6) / 定时器中断(0x8000_0007)，处理程序记录 (mcause, mepc) 后
+> 同步异常 `mepc+4` 跳过、中断则清定时器中断并置标志，全部 MRET 正确返回。
 >
 > 结果槽期望值不是手算：生成器内置一份 **RV32I 参考模型**，每条指令在生成时
 > 同时被模型执行，期望值与「指令实际语义」交叉核对；另有覆盖率自检，
@@ -758,6 +760,20 @@ T+1 拍数据回来了而 `mem_alu_result` 已前进 —— 提取用的字节�
 > 2 拍才置起，程序写完立刻轮询可能读到旧值 —— 需要像 `tb/prog` 那样写后插几条
 > `nop` 再轮询。
 
+#### CSR 与陷阱的时序（重要）
+
+- **CSR 读在 EX 级组合进行**，读出的旧值随指令经 EX2MEM→MEM2WB 写回 rd
+  （`wb_sel = WB_CSR`）；**CSR 写在 MEM 级提交** —— 这样被冲刷的 CSR 指令不会
+  产生写，陷阱是精确的。
+- **陷阱在 EX 级判定**：`trap_en` 冲刷 ID/EX 与 EX2MEM 并重定向到 `mtvec`，
+  CSR 模块在同一拍写入 `mepc`/`mcause` 并把 MIE→MPIE、MIE←0；`MRET` 反向恢复。
+- 两条「同拍顺序」的坑（都已修）：
+  1. 同拍既有「更老的 CSR 指令在 MEM 提交」又有「EX 级陷阱」时，必须**先做 CSR 写**
+     （陷阱只覆盖写同一寄存器的情形）—— 否则 `csrw mtvec` 之后立刻陷入会跳到旧向量；
+  2. **`mtvec` 需要同拍前递**，否则设置向量后的下一条指令陷入仍用旧向量。
+- **前递**：EX/MEM 前递源按优先级选择 —— CSR 指令前递 CSR 旧值、load 前递提取数据、
+  其它前递 ALU 结果（`EX.sv` 的 `ex_mem_fwd_data`）。
+
 > **时序提示**：地址通路变成「EX 级 ALU → BRAM addra」，读数据通路变成
 > 「BRAM douta → 提取 → EX 前递 MUX → ALU」。100 MHz 下可收敛（本工程尚未加时钟
 > 约束、未做时序收敛）；若将来提高频率，可考虑在 ID 级并行算出地址（`rs1 + imm`）
@@ -791,12 +807,10 @@ T+1 拍数据回来了而 `mem_alu_result` 已前进 —— 提取用的字节�
 
 - 程序由 `tb/prog/gen_cpu_test.py` 生成：内置 **RV32I 参考模型**（期望值与指令
   语义交叉核对）+ **覆盖率自检**（缺一条指令直接报错）+ 往返解码自检。
-- 覆盖 **RV32I 非陷阱指令 38/40**：R 型 10、I 型 9、U 型 2、访存 8（含通道
-  隔离、load-use、背靠背 load）、分支 6（16 个跳/不跳与边界用例）、跳转 2
-  （含 `&~1` 对齐、后向 jalr）、fence；另含 UART 实发 `"OK\n"`、GPIO 回环、
-  TIMER 溢出轮询。
-- **共 102 项检查全部通过**（95 个结果槽 + RESULT/DONE + 外设引脚）。
-- ECALL/EBREAK 属陷阱指令，需 CSR/异常机制，目前只在 `tb_decoder` 做译码覆盖。
+- 覆盖 **RV32I 40/40**（R 型 10、I 型 9、U 型 2、访存 8、分支 6、跳转 2、
+  系统 3 含 ECALL/EBREAK/FENCE）+ **Zicsr 6/6** + MRET；另含异常/中断用例、
+  UART 实发 `"OK\n"`、GPIO 回环、TIMER 溢出轮询。
+- **共 118 项期望值 + RESULT/DONE + 外设引脚全部通过**。
 
 **★ 数据侧 BRAM 读延迟对齐（本次解决）**
 
@@ -855,31 +869,28 @@ MEM 级只保留取数通路 `MEM_load.sv`）：
   ID/EX 级，避免只冻结取指导致指令流错位。
 - **分支机构**：分支在 EX 解析（2 气泡），可前移到 ID；无分支预测。
 
-**② 异常与中断（进行中，仅差系统级收尾）**
-
-已实现（模块级全绿）：
+**② 异常 / 中断 / CSR（已完成）**
 
 - **CSR 文件** `rtl/Core/CSR/CSR.sv`：mstatus / misa / mie / mtvec / mscratch /
-  mepc / mcause / mtval / mip，读在 EX 级、写经 EX2MEM 到 MEM 级提交
-  （保证陷阱精确），带同拍写前递。
-- **Zicsr 六条**（CSRRW/S/C + 立即数形式）与 **MRET**；非法 CSR 地址 / 写只读
-  CSR → 非法指令异常。
+  mepc / mcause / mtval（只读 0）/ mip（只读 MTIP）。读在 EX 级组合进行、写经
+  EX2MEM 到 **MEM 级提交**（保证陷阱精确：被冲刷的 CSR 指令不产生写），并带
+  同拍写前递（连续两条 CSR 指令操作同一寄存器时后一条看到前一条的结果）。
+- **Zicsr 六条**（CSRRW/S/C + 立即数形式，共 6 条）+ **MRET**；`rs1=0` / `uimm=0`
+  时不写 CSR 的规则、非法地址与写只读 CSR → 非法指令。
 - **陷阱入口**：非法指令(2)、EBREAK(3)、非对齐 load(4)/store(6)、ECALL(11)、
-  定时器中断(0x8000_0007)；异常在 EX 级冲刷 EX2MEM（出错指令不写回），
+  定时器中断(0x8000_0007)。异常在 EX 级冲刷 EX2MEM（出错指令不写回），
   **非对齐访存在 EX 级就被拦下并门控请求**（不会先写坏内存再报异常）。
-- **中断**：`mip.MTIP & mie.MTIE & mstatus.MIE`，只在「EX 级是真实指令且不是
-  访存指令」时受理（避免让已发出访存的指令部分执行）。
-- 三个由此暴露并修复的**真实 bug**：
+- **中断**：`mip.MTIP & mie.MTIE & mstatus.MIE`，只在「EX 级是真实指令
+  （`id_ex_valid`）且不是访存指令」时受理 —— 避免让已发出访存的指令部分执行。
+- 由此暴露并修复的**三个真实 bug**（都会破坏真机代码）：
   1. 陷阱与「更老的 CSR 写」同拍时不能覆盖整个写（否则紧挨 `csrw mtvec` 的陷阱
-     会跳到旧向量）；现在先做 CSR 写、再由陷阱覆盖同寄存器的情形。
-  2. `mtvec` 需要同拍前递，否则设置向量后的下一条指令陷入会跳到旧向量。
-  3. **CSR 指令写入 rd 的是 CSR 旧值，EX/MEM 前递路径必须前递它**（与 load 数据
-     同理）；此前「CSR 指令 → 紧随其后使用其结果的指令」拿到的是 ALU 结果。
-
-待收尾：系统级陷阱用例里，处理程序的**记录簿记**仍有问题 —— 记录指针最终为
-0x560（期望 0x270），记录写到错误地址，程序随后卡住；`tb_top` 因此尚未全绿
-（118 项中 105 项通过）。下一步就是定位这条 `sw x23, TRAP_PTR` /
-`lw x26, TRAP_PTR` 的指针链路。
+     会跳到旧向量 0）；现在先做 CSR 写，再由陷阱覆盖写同一寄存器的情形。
+  2. `mtvec` 缺同拍前递 —— 设置向量后的下一条指令陷入时会用旧向量。
+  3. **CSR 指令写 rd 的是 CSR 旧值，EX/MEM 前递路径必须前递它**（与 load 数据
+     同理），否则「CSR 指令 → 紧接着用其结果的指令」拿到的是 ALU 结果。
+- 系统级用例（`tb/prog/gen_cpu_test.py` 的陷阱段）另修了两处**测试程序**缺陷：
+  记录指针必须是「完整 RAM 地址」而非偏移量；中断处理程序要先关掉定时器中断
+  （重载值很小，只清溢出会立刻再中断，形成中断风暴）。
 
 **③ 外设增强**
 

@@ -347,8 +347,8 @@ ff289ae3    // 0x410  bne  x17, x18, j3_loop  后向分支循环
 34001073    // 0x4dc  csrrw x0, mscratch, x0   清 mscratch
 
 // === 异常：ECALL / EBREAK / 非法指令 / 非对齐访存 ===
-00000b93    // 0x4e0  addi x23, x0, 0
-240b8b93    // 0x4e4  addi x23, x23, 576   记录指针 = 陷阱记录区
+10000bb7    // 0x4e0  lui  x23, 0x10000      记录指针 = RAM 基址 + 陷阱记录区
+240b8b93    // 0x4e4  addi x23, x23, 576   记录指针 = RAM 基址 + 陷阱记录区
 2972a023    // 0x4e8  sw   x23, TRAP_PTR
 00000b93    // 0x4ec  addi x23, x0, 0
 2972a223    // 0x4f0  sw   x23, IRQ_FLAG   清中断标志
@@ -378,7 +378,7 @@ fe0c8ee3    // 0x53c  beq  x25, x0, irq_loop  ← 中断在这里被受理
 000c2423    // 0x548  sw   x0, 8(x24)       TIMER.CTRL = 0
 00100c93    // 0x54c  addi x25, x0, 1
 019c2623    // 0x550  sw   x25, 0x0C(x24)   STATUS 写 1 清溢出
-0500006f    // 0x554  jal  x0, trap_done     跳过陷阱处理程序
+0540006f    // 0x554  jal  x0, trap_done     跳过陷阱处理程序
 340e9ef3    // 0x558  csrrw x29, mscratch, x29  保存 x29
 34202e73    // 0x55c  csrrs x28, mcause, x0      x28 = mcause
 34102df3    // 0x560  csrrs x27, mepc, x0        x27 = mepc
@@ -387,82 +387,83 @@ fe0c8ee3    // 0x53c  beq  x25, x0, irq_loop  ← 中断在这里被受理
 01bd2223    // 0x56c  sw   x27, 4(x26)          记录 mepc
 008d0d13    // 0x570  addi x26, x26, 8
 29a2a023    // 0x574  sw   x26, TRAP_PTR        指针 +8
-000e5e63    // 0x578  bge  x28, x0, h_sync      非负（同步异常）→ h_sync；否则中断路径
-00100d13    // 0x57c  addi x26, x0, 1
-29a2a223    // 0x580  sw   x26, IRQ_FLAG        置中断标志
-20000d37    // 0x584  lui  x26, 0x20000      TIMER 基址
-00100d93    // 0x588  addi x27, x0, 1
-01bd2623    // 0x58c  sw   x27, 0x0C(x26)      STATUS 写 1 清溢出
-00c0006f    // 0x590  jal  x0, h_ret
-004d8d93    // 0x594  addi x27, x27, 4          跳过出错指令
-341d9073    // 0x598  csrrw x0, mepc, x27
-340e9ef3    // 0x59c  csrrw x29, mscratch, x29  恢复 x29
-30200073    // 0x5a0  mret
+020e5063    // 0x578  bge  x28, x0, h_sync      非负（同步异常）→ h_sync；否则中断路径
+30401073    // 0x57c  csrrw x0, mie, x0          关定时器中断（防风暴）
+00100d13    // 0x580  addi x26, x0, 1
+29a2a223    // 0x584  sw   x26, IRQ_FLAG        置中断标志
+20000d37    // 0x588  lui  x26, 0x20000      TIMER 基址
+00100d93    // 0x58c  addi x27, x0, 1
+01bd2623    // 0x590  sw   x27, 0x0C(x26)      STATUS 写 1 清溢出
+00c0006f    // 0x594  jal  x0, h_ret
+004d8d93    // 0x598  addi x27, x27, 4          跳过出错指令
+341d9073    // 0x59c  csrrw x0, mepc, x27
+340e9ef3    // 0x5a0  csrrw x29, mscratch, x29  恢复 x29
+30200073    // 0x5a4  mret
 
 // === 外设：UART 发 "OK\n" / GPIO 回环 / TIMER 溢出轮询 ===
-200005b7    // 0x5a4  lui  x11, 0x20000     x11 = 0x2000_0000
-40058593    // 0x5a8  addi x11, x11, 0x400  +0x400
-40058593    // 0x5ac  addi x11, x11, 0x400  x11 = UART 基址
-36300613    // 0x5b0  addi x12, x0, 867     BAUD = 867
-00c5a623    // 0x5b4  sw   x12, 0x0C(x11)   UART.BAUD
-00000613    // 0x5b8  addi x12, x0, 0
-0085a683    // 0x5bc  lw   x13, 8(x11)      UART.STATUS
-0016f693    // 0x5c0  andi x13, x13, 1      TX_BUSY
-fe069ce3    // 0x5c4  bne  x13, x0, -8      忙则等
-04f00693    // 0x5c8  addi x13, x0, 'O'
-00d5a023    // 0x5cc  sw   x13, 0(x11)      发 'O'
-00000013    // 0x5d0  nop                   等 TX_BUSY 置起
-00000013    // 0x5d4  nop
+200005b7    // 0x5a8  lui  x11, 0x20000     x11 = 0x2000_0000
+40058593    // 0x5ac  addi x11, x11, 0x400  +0x400
+40058593    // 0x5b0  addi x11, x11, 0x400  x11 = UART 基址
+36300613    // 0x5b4  addi x12, x0, 867     BAUD = 867
+00c5a623    // 0x5b8  sw   x12, 0x0C(x11)   UART.BAUD
+00000613    // 0x5bc  addi x12, x0, 0
+0085a683    // 0x5c0  lw   x13, 8(x11)      UART.STATUS
+0016f693    // 0x5c4  andi x13, x13, 1      TX_BUSY
+fe069ce3    // 0x5c8  bne  x13, x0, -8      忙则等
+04f00693    // 0x5cc  addi x13, x0, 'O'
+00d5a023    // 0x5d0  sw   x13, 0(x11)      发 'O'
+00000013    // 0x5d4  nop                   等 TX_BUSY 置起
 00000013    // 0x5d8  nop
 00000013    // 0x5dc  nop
-0085a683    // 0x5e0  lw   x13, 8(x11)
-0016f693    // 0x5e4  andi x13, x13, 1
-fe069ce3    // 0x5e8  bne  x13, x0, -8
-04b00693    // 0x5ec  addi x13, x0, 'K'
-00d5a023    // 0x5f0  sw   x13, 0(x11)      发 'K'
-00000013    // 0x5f4  nop
+00000013    // 0x5e0  nop
+0085a683    // 0x5e4  lw   x13, 8(x11)
+0016f693    // 0x5e8  andi x13, x13, 1
+fe069ce3    // 0x5ec  bne  x13, x0, -8
+04b00693    // 0x5f0  addi x13, x0, 'K'
+00d5a023    // 0x5f4  sw   x13, 0(x11)      发 'K'
 00000013    // 0x5f8  nop
 00000013    // 0x5fc  nop
 00000013    // 0x600  nop
-0085a683    // 0x604  lw   x13, 8(x11)
-0016f693    // 0x608  andi x13, x13, 1
-fe069ce3    // 0x60c  bne  x13, x0, -8
-00a00693    // 0x610  addi x13, x0, '\n'
-00d5a023    // 0x614  sw   x13, 0(x11)      发 '\n'
-00000013    // 0x618  nop
+00000013    // 0x604  nop
+0085a683    // 0x608  lw   x13, 8(x11)
+0016f693    // 0x60c  andi x13, x13, 1
+fe069ce3    // 0x610  bne  x13, x0, -8
+00a00693    // 0x614  addi x13, x0, '\n'
+00d5a023    // 0x618  sw   x13, 0(x11)      发 '\n'
 00000013    // 0x61c  nop
-40058713    // 0x620  addi x14, x11, 0x400  GPIO 基址
-0ff00793    // 0x624  addi x15, x0, 0xFF
-00f72223    // 0x628  sw   x15, 4(x14)      GPIO.DIR = 0xFF
-05a00793    // 0x62c  addi x15, x0, 0x5A
-00f72023    // 0x630  sw   x15, 0(x14)      GPIO.DATA = 0x5A
-00072783    // 0x634  lw   x15, 0(x14)      回环读回
-80058a13    // 0x638  addi x20, x11, -0x800 TIMER 基址
-0c800793    // 0x63c  addi x15, x0, 200
-00fa2023    // 0x640  sw   x15, 0(x20)      TIMER.LOAD = 200
-00300a93    // 0x644  addi x21, x0, 3       EN | IRQ_EN
-015a2423    // 0x648  sw   x21, 8(x20)      TIMER.CTRL = 3
-00ca2a83    // 0x64c  lw   x21, 0x0C(x20)   TIMER.STATUS
-001afa93    // 0x650  andi x21, x21, 1      OVERFLOW
-fe0a8ce3    // 0x654  beq  x21, x0, -8      轮询溢出
-00100713    // 0x658  addi x14, x0, 1
-00ea2623    // 0x65c  sw   x14, 0x0C(x20)   写 1 清 OVERFLOW
+00000013    // 0x620  nop
+40058713    // 0x624  addi x14, x11, 0x400  GPIO 基址
+0ff00793    // 0x628  addi x15, x0, 0xFF
+00f72223    // 0x62c  sw   x15, 4(x14)      GPIO.DIR = 0xFF
+05a00793    // 0x630  addi x15, x0, 0x5A
+00f72023    // 0x634  sw   x15, 0(x14)      GPIO.DATA = 0x5A
+00072783    // 0x638  lw   x15, 0(x14)      回环读回
+80058a13    // 0x63c  addi x20, x11, -0x800 TIMER 基址
+0c800793    // 0x640  addi x15, x0, 200
+00fa2023    // 0x644  sw   x15, 0(x20)      TIMER.LOAD = 200
+00300a93    // 0x648  addi x21, x0, 3       EN | IRQ_EN
+015a2423    // 0x64c  sw   x21, 8(x20)      TIMER.CTRL = 3
+00ca2a83    // 0x650  lw   x21, 0x0C(x20)   TIMER.STATUS
+001afa93    // 0x654  andi x21, x21, 1      OVERFLOW
+fe0a8ce3    // 0x658  beq  x21, x0, -8      轮询溢出
+00100713    // 0x65c  addi x14, x0, 1
+00ea2623    // 0x660  sw   x14, 0x0C(x20)   写 1 清 OVERFLOW
 
 // === 半字自检 + RESULT + DONE ===
-00100313    // 0x660  addi x6, x0, 1        通过标志
-10000eb7    // 0x664  lui  x29, 0x10000
-300e8e93    // 0x668  addi x29, x29, 0x300  x29 = RAM+0x300
-0000ce37    // 0x66c  lui  x28, 0xC
-eefe0e13    // 0x670  addi x28, x28, -0x111 x28 = 0xBEEF
-01ce9023    // 0x674  sh   x28, 0(x29)      RAM[0x300] = 0xBEEF
-000eaf03    // 0x678  lw   x30, 0(x29)
-000edf83    // 0x67c  lhu  x31, 0(x29)
-bef00e93    // 0x680  addi x29, x0, -0x411
-00000f13    // 0x684  addi x30, x0, 0
-01df9463    // 0x688  bne  x31, x29, +8     半字读对则跳过
-00000313    // 0x68c  addi x6, x0, 0        ★ 半字读错：置失败
-0062a023    // 0x690  sw   x6, RESULT
-600d23b7    // 0x694  lui  x7, 0x600D2      x7 = 0x600D_2000
-eaf38393    // 0x698  addi x7, x7, -0x151   x7 = 0x600D_1EAF
-0072a223    // 0x69c  sw   x7, DONE
-0000006f    // 0x6a0  jal  x0, 0            ★ 挂死点
+00100313    // 0x664  addi x6, x0, 1        通过标志
+10000eb7    // 0x668  lui  x29, 0x10000
+300e8e93    // 0x66c  addi x29, x29, 0x300  x29 = RAM+0x300
+0000ce37    // 0x670  lui  x28, 0xC
+eefe0e13    // 0x674  addi x28, x28, -0x111 x28 = 0xBEEF
+01ce9023    // 0x678  sh   x28, 0(x29)      RAM[0x300] = 0xBEEF
+000eaf03    // 0x67c  lw   x30, 0(x29)
+000edf83    // 0x680  lhu  x31, 0(x29)
+bef00e93    // 0x684  addi x29, x0, -0x411
+00000f13    // 0x688  addi x30, x0, 0
+01df9463    // 0x68c  bne  x31, x29, +8     半字读对则跳过
+00000313    // 0x690  addi x6, x0, 0        ★ 半字读错：置失败
+0062a023    // 0x694  sw   x6, RESULT
+600d23b7    // 0x698  lui  x7, 0x600D2      x7 = 0x600D_2000
+eaf38393    // 0x69c  addi x7, x7, -0x151   x7 = 0x600D_1EAF
+0072a223    // 0x6a0  sw   x7, DONE
+0000006f    // 0x6a4  jal  x0, 0            ★ 挂死点

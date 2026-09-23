@@ -710,8 +710,9 @@ def append_trap_section(p):
 
     p.section("=== 异常：ECALL / EBREAK / 非法指令 / 非对齐访存 ===")
     rec = TRAP_REC_OFF + 64          # 陷阱记录从这里开始（CSR 自测占了 36 字节）
-    p.emit(addi(23, 0, 0), "addi", "addi x23, x0, 0")
-    p.li(23, rec, "记录指针 = 陷阱记录区")
+    # 记录指针必须是「完整 RAM 地址」：处理程序里用 sw …, 0(x26) 直接写，
+    # 若只放偏移量（0x240）就会写到未映射地址、从机片选为 0 → 写丢失。
+    p.li(23, RAM_BASE + rec, "记录指针 = RAM 基址 + 陷阱记录区")
     p.emit(sw(23, TRAP_PTR_OFF, 5), "sw", "sw   x23, TRAP_PTR")
     p.emit(addi(23, 0, 0), "addi", "addi x23, x0, 0")
     p.emit(sw(23, IRQ_FLAG_OFF, 5), "sw", "sw   x23, IRQ_FLAG   清中断标志")
@@ -775,7 +776,9 @@ def append_trap_section(p):
     p.raw(sw(26, TRAP_PTR_OFF, 5), "sw", "sw   x26, TRAP_PTR        指针 +8")
     p.branch("bge", bge(28, 0, 0), "h_sync",
              "bge  x28, x0, h_sync      非负（同步异常）→ h_sync；否则中断路径")
-    # 中断分支：置标志 + 清定时器溢出
+    # 中断分支：先关掉定时器中断（重载值很小，若只清溢出会立刻再次中断，
+    # 形成中断风暴把主程序饿死），再置标志 + 清溢出
+    p.raw(csrrw(0, CSR_MIE, 0), "csrrw", "csrrw x0, mie, x0          关定时器中断（防风暴）")
     p.raw(addi(26, 0, 1), "addi", "addi x26, x0, 1")
     p.raw(sw(26, IRQ_FLAG_OFF, 5), "sw", "sw   x26, IRQ_FLAG        置中断标志")
     p.li_raw(26, TIMER_BASE, "TIMER 基址")
@@ -819,7 +822,7 @@ def append_trap_section(p):
         p.expect_ram(base + i*8 + 0, cause, f"{name}: mcause")
         p.expect_ram(base + i*8 + 4, addr,  f"{name}: mepc")
     p.expect_ram(IRQ_FLAG_OFF, 1, "定时器中断已发生")
-    p.expect_ram(TRAP_PTR_OFF, rec + 6*8, "陷阱指针（6 条记录之后）")
+    p.expect_ram(TRAP_PTR_OFF, RAM_BASE + rec + 6*8, "陷阱指针（6 条记录之后）")
     return handler_addr
 
 
