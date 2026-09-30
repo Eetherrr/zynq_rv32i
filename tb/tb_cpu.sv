@@ -96,12 +96,88 @@ module tb_cpu;
     beh_ram u_ram (.clk(clk), .ena(ram_ena), .we(ram_we), .addr(ram_addr),
                    .din(ram_data_o), .wea(ram_be), .dout(ram_data_i));
 
+    //------------------------------------------------------------------
+    // 等待态注入（阶段 0：验证整流水线停顿通路）
+    //   模拟「慢速从机」：周期性把 hold_flag_i 拉高 W 拍（W 与周期都变化，
+    //   以便覆盖各种相对相位 —— 停顿可能落在取指、load、store 任意位置）。
+    //   WAIT_EN = 0 可关闭注入（便于二分定位问题）。
+    //------------------------------------------------------------------
+    //------------------------------------------------------------------
+    // 等待态注入开关（阶段 0）
+    //   WAIT_EN = 0：默认关闭，本测试平台保持原有 40 项全绿（回归基线）
+    //   WAIT_EN = 1：每次访存事务的数据相插入等待（WAIT_STRESS=0 → 1 拍；
+    //                WAIT_STRESS=1 → 长度/相位 8 种轮换）
+    //   ★ 打开后会复现「等待态下的访存/取指重同步」已知问题（目前 1 项不符），
+    //     详见 doc/amba_migration_plan.md §7 阶段 0。修好后再把默认值改为 1。
+    //------------------------------------------------------------------
+    bit         WAIT_EN     = 1'b0;
+    bit         WAIT_STRESS = 1'b0;
+    logic [7:0] wait_hold = 8'd0;
+    logic [7:0] wait_cnt  = 8'd0;
+    logic [7:0] wait_w    = 8'd1;
+    logic [7:0] wait_per  = 8'd3;
+    logic [2:0] wait_ph   = 3'd0;
+    int         wait_total = 0;          // 累计注入的等待拍数（报告用）
+
+    // 8 种「等待长度 / 间隔」组合轮换 → 停顿落在取指/load/store 的各种相位上
+    task automatic next_pattern();
+        wait_ph <= wait_ph + 3'd1;
+        if (!WAIT_STRESS) begin          // 默认：只插 1 拍、紧跟数据相
+            wait_w   <= 8'd1;
+            wait_per <= 8'd0;
+            return;
+        end
+        case (wait_ph)
+            3'd0: begin wait_w <= 8'd1; wait_per <= 8'd0; end
+            3'd1: begin wait_w <= 8'd2; wait_per <= 8'd0; end
+            3'd2: begin wait_w <= 8'd3; wait_per <= 8'd0; end
+            3'd3: begin wait_w <= 8'd4; wait_per <= 8'd0; end
+            3'd4: begin wait_w <= 8'd2; wait_per <= 8'd1; end
+            3'd5: begin wait_w <= 8'd3; wait_per <= 8'd1; end
+            3'd6: begin wait_w <= 8'd5; wait_per <= 8'd0; end
+            3'd7: begin wait_w <= 8'd1; wait_per <= 8'd0; end
+        endcase
+    endtask
+
+    logic [7:0] wait_dcnt = 8'd0;      // 事务开始后的倒计时
+    logic       wait_arm  = 1'b0;
+    logic       mem_act_d = 1'b0;      // 上一拍是否有访存事务
+    wire        mem_start = (ram_re | ram_we) & ~mem_act_d;   // 新事务开始（上升沿）
+
+    always_ff @(posedge clk) begin
+        if (rst_sys == `RESET_EN || !WAIT_EN) begin
+            wait_hold <= 8'd0;
+            wait_cnt  <= 8'd0;
+            wait_arm  <= 1'b0;
+            wait_dcnt <= 8'd0;
+            mem_act_d <= 1'b0;
+        end
+        else if (wait_hold != 8'd0) begin          // 正在等待
+            wait_hold  <= wait_hold - 8'd1;
+            wait_total <= wait_total + 1;
+        end
+        else if (wait_arm && wait_dcnt == 8'd0) begin   // 到点：开始等待
+            wait_arm  <= 1'b0;
+            wait_hold <= wait_w;
+            next_pattern();
+        end
+        else if (mem_start) begin                  // 新访存事务开始：装载倒计时（只装一次）
+            wait_arm  <= 1'b1;
+            wait_dcnt <= wait_per;                 // 0 = 本事务数据相即开始等待
+        end
+        else if (wait_arm) begin
+            wait_dcnt <= wait_dcnt - 8'd1;
+        end
+        mem_act_d <= (ram_re | ram_we);
+    end
+    wire hold_flag = (wait_hold != 8'd0);
+
     CPU_top u_cpu (
         .clk_sys(clk), .rst_sys(rst_sys),
         .rom_instr_i(rom_data), .rom_instr_addr_o(rom_addr),
         .ram_addr_o(ram_addr), .ram_data_o(ram_data_o), .ram_be_o(ram_be),
         .ram_we_o(ram_we), .ram_re_o(ram_re), .ram_data_i(ram_data_i),
-        .int_i(8'b0), .hold_flag_i(1'b0),
+        .int_i(8'b0), .hold_flag_i(hold_flag),
         .if_grant_i(1'b1),          // 单主机：取指始终获得授权
         .bus_grant_valid_i(1'b0)
     );
@@ -280,12 +356,12 @@ module tb_cpu;
         // ---- 等待程序跑到自跳挂死（完成标志：mem[12] == 7）----
         begin : wait_done
             bit done = 1'b0;
-            for (i = 0; i < 8000; i = i + 1) begin
+            for (i = 0; i < 60000; i = i + 1) begin
                 @(posedge clk);
-                if (u_ram.mem[12] === 32'd7) begin done = 1'b1; i = 8000; end
+                if (u_ram.mem[12] === 32'd7) begin done = 1'b1; i = 60000; end
             end
-            $display("==> 等待结束：完成标志 %s（等待 %0d 拍）PC=%h",
-                     done ? "已置位" : "未置位！程序未跑完", i, u_cpu.if_pc);
+            $display("==> 等待结束：done=%0b 耗时 %0t 注入等待 %0d 拍 PC=%h",
+                     done, $time, wait_total, u_cpu.if_pc);
         end
         for (i = 0; i < 8; i = i + 1) begin
             @(posedge clk);

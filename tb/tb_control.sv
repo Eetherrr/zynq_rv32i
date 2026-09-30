@@ -18,7 +18,7 @@ module tb_control;
     logic [`DATA_BUS] ex_pc;
     logic ex_illegal, ex_ecall, ex_ebreak;
     logic ex_load_misaligned, ex_store_misaligned, ex_csr_illegal;
-    logic interrupt_req, mret_en;
+    logic interrupt_req, mret_en, ex_stall;
     logic [`DATA_BUS] mtvec, mepc;
     logic trap_en;
     logic [`DATA_BUS] trap_cause, trap_pc;
@@ -40,6 +40,7 @@ module tb_control;
         .ex_load_misaligned(ex_load_misaligned),
         .ex_store_misaligned(ex_store_misaligned),
         .ex_csr_illegal(ex_csr_illegal),
+        .ex_stall(ex_stall),
         .interrupt_req(interrupt_req), .mtvec(mtvec),
         .mret_en(mret_en), .mepc(mepc),
         .trap_en(trap_en), .trap_cause(trap_cause), .trap_pc(trap_pc),
@@ -79,7 +80,7 @@ module tb_control;
         ex_pc=32'h0;
         ex_branch_taken=0; ex_jump_taken=0; ex_illegal=0; ex_ecall=0; ex_ebreak=0;
         ex_load_misaligned=0; ex_store_misaligned=0; ex_csr_illegal=0;
-        interrupt_req=0; mret_en=0; mtvec=32'h0; mepc=32'h0;
+        interrupt_req=0; mret_en=0; mtvec=32'h0; mepc=32'h0; ex_stall=0;
         id_ex_rd_addr=0; id_ex_rd_we=0; id_ex_mem_read=0;
         id_instr=i_type(0,0); id_rs1_addr=0; id_rs2_addr=0;
         ex_branch_target=0; ex_jump_target=0;
@@ -196,6 +197,16 @@ module tb_control;
         idle(); mtvec=32'h0000_0F00; ex_branch_taken=1;
         ex_branch_target=32'hAAAA_0000; interrupt_req=1; #1;
         ck32("陷阱优先于分支目标", redirect_pc, 32'h0000_0F00);
+        $display("\n-- 停顿中不提交（等待态把 EX 指令冻住）--");
+        idle(); ex_stall=1; ex_branch_taken=1; ex_branch_target=32'hAAAA_0001;
+        ex_jump_taken=1; ex_jump_target=32'hAAAA_0002; ex_illegal=1;
+        interrupt_req=1; mtvec=32'h0000_0F00; #1;
+        ck1("停顿中: 不重定向", redirect_en, 1'b0);
+        ck1("停顿中: 不产生异常", exception_en, 1'b0);
+        ck1("停顿中: 不进入陷阱", trap_en, 1'b0);
+        ck1("停顿中: 不冲刷", flush_if2id, 1'b0);
+        ck1("停顿中: flush_ex2mem=0", flush_ex2mem, 1'b0);
+
         // MRET：返回 mepc
         idle(); mret_en=1; mepc=32'h0000_0456; #1;
         ck1("MRET: redirect_en", redirect_en, 1'b1);

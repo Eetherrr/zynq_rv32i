@@ -36,7 +36,7 @@ CPU 本体采用经典**五级流水线**（IF / ID / EX / MEM / WB），通过�
 | 外设 | TIMER / SPI / UART / GPIO（各为独立模块） |
 | 目标器件 | `xc7z010clg400-1`（Zynq-7010，CLG400 封装） |
 | 顶层模块 | `CPU_SOC_top` |
-| 验证状态 | 模块级 10 个测试平台 **420 项** + RIB/外设 **25 项** + **SoC 系统级 RV32I 40/40 全覆盖 118 项**，全部通过（见 [5.6](#56-验证方式) / [7](#7-当前进度)） |
+| 验证状态 | 模块级 10 个测试平台 **425 项** + RIB/外设 **25 项** + **SoC 系统级 RV32I 40/40 全覆盖 118 项**，全部通过（见 [5.6](#56-验证方式) / [7](#7-当前进度)） |
 | 开发工具 | Vivado 2022.2 + Makefile + Tcl 脚本 |
 
 ---
@@ -52,7 +52,9 @@ zynq_rv32i/
 ├── constrs/                  # 约束
 │   ├── pins.csv              #   引脚表（make pins 生成模板，手工填 Pin 号）
 │   └── pins.xdc              #   由 pins.csv 自动生成（勿手改）
-├── doc/structure/            # 架构框图（cpu / RIB / instruction_fetch）
+├── doc/
+│   ├── structure/            #   架构框图（cpu / RIB / instruction_fetch）
+│   └── amba_migration_plan.md#   ★ SoC 总线迁移到 AMBA 的方案讨论稿（仅方案）
 ├── prj/                      # Vivado 工程与运行产物（gitignore，可重建）
 │   └── *.srcs/sources_1/ip/  #   Block Memory Generator IP（ROM / RAM）
 ├── rtl/                      # 可综合 RTL
@@ -367,7 +369,9 @@ CPU 侧与之配套：**访存地址在 EX 级发起**（`MEM_req`），BRAM 的
 
 - 冲刷下游流水寄存器为 NOP，保证错误路径指令不写回、不访存。
 - WB 级不需要 flush（`flush_mem2wb` 恒 0）。
-- `hold_flag_i` 由外设拉高时冻结 PC，实现总线等待（当前无外设使用）。
+- `hold_flag_i` 现在是**整流水线停顿**（阶段 0，见 §7 ①）：冻 PC / IF2ID / ID2EX /
+  EX2MEM / MEM2WB，并冻结送 ROM 的取指地址（`if_addr_q`）、锁存 MEM 级读数据
+  （`mem_rdata_q`），停顿中不提交重定向/陷阱/中断。当前无外设使用它。
 - **取指与数据访问抢总线**：数据口（m0）优先级高于取指口（m1）。数据访问那一拍
   ROM 的地址输入被换成数据地址，于是「本拍要取的地址没送进 ROM」→ 冻结 PC 让
   下一拍重发；「下一拍 ROM 输出的是数据地址的内容」→ 注入一个 NOP 丢掉。
@@ -515,7 +519,7 @@ vivado -nolog -nojournal -mode batch -source scripts/run_unit.tcl \
 **完全绕开 ROM/RAM 的 Block Memory Generator IP**，无需任何 IP 库即可运行。
 这是排查 CPU 本体问题时最快的手段。
 
-现有 10 个测试平台，共 **420 项检查，全部通过**：
+现有 10 个测试平台，共 **425 项检查，全部通过**：
 
 | 测试平台 | 覆盖内容 | 项数 |
 | --- | --- | :-: |
@@ -527,7 +531,7 @@ vivado -nolog -nojournal -mode batch -source scripts/run_unit.tcl \
 | `tb_csr` | **CSR 文件**：mstatus/mie/mtvec/mscratch/mepc/mcause 读写、只读寄存器、地址译码、同拍写前递、**陷阱入口（mepc/mcause/MPIE）**、MRET、中断挂起 | 34 |
 | `tb_ex` | 前递优先级（EX/MEM > MEM/WB）、**load 前递数据、CSR 前递读出的旧值**、store 数据取原始 rs2、x0/rd_we 屏蔽 | 23 |
 | `tb_mem` | `MEM_req` 的请求/字节使能/store 通道搬移/**对齐检查与非对齐门控** + `MEM_load` 的通道提取/符号扩展 | 41 |
-| `tb_control` | 冲刷、重定向、异常/中断陷阱与 cause 编码、优先级、MRET；**load-use 不停顿**；**重定向不冲刷 EX2MEM** | 55 |
+| `tb_control` | 冲刷、重定向、异常/中断陷阱与 cause 编码、优先级、MRET；**load-use 不停顿**；**重定向不冲刷 EX2MEM**；**停顿中不提交（不重定向/不异常/不陷入）** | 60 |
 | `tb_cpu` | **完整 CPU**：取指→执行→写回全通路（行为级存储器替代 IP），含 load-use、背靠背 load、store 的 rs2 无前递、store→load 同址、LB/LH/LBU/LHU 扩展、循环（分支目标非幂等）、**JAL/JALR 链接值** | 40 |
 
 运行示例：
@@ -859,53 +863,22 @@ MEM 级只保留取数通路 `MEM_load.sv`）：
 
 ### 🚧 进行中 / 待完成
 
-**① 微架构 / 时序**
+**① 微架构 / 时序 —— 阶段 0（整流水线停顿）进行中**
+
+已完成：`hold_flag_i` 升级为**整流水线停顿**（冻 PC / IF2ID / ID2EX / EX2MEM / MEM2WB）、
+新增**可停顿取指地址寄存** `if_addr_q`（避免停顿时丢掉在途指令）、**MEM 级读数据锁存**
+`mem_rdata_q`、以及**停顿中不提交**（`Control.ex_stall` 门控重定向/陷阱/中断，`mret` 同门控）。
+现有回归保持全绿（425 + 25 + 118）。
+遗留：打开 `tb/tb_cpu.sv` 的 `WAIT_EN`（等待态注入，当前默认 0）后仍有 1 项不符
+（`mem[7] lb` 读到 `0xFF`），详见
+[`doc/amba_migration_plan.md`](doc/amba_migration_plan.md) §7 阶段 0 的遗留问题与下一步。
 
 - **地址通路变长**：现在是「EX 级 ALU → BRAM addra」+「BRAM douta → 提取 →
   前递 → ALU」两条组合路径。100 MHz 可收敛，但**尚未加时钟约束、未做时序收敛**；
   若提高频率，可把访存地址在 ID 级并行算出（`rs1 + imm`）。
-- **失速路径保留**：`Control.stall_*` 目前恒 0，多周期从机的 `hold_flag_i` 冻结点
-  在 `CPU_top` 侧（`if_stall`）—— 外设若需要等待周期，还需把 `hold_flag` 一并接到
+- **失速路径（阶段 0，进行中）**：`hold_flag_i` 已接到整条流水线（见 §7 ①），
+  但等待态下仍有 1 项 store/load 数据通路用例未过（`tb/tb_cpu.sv` 的 `WAIT_EN` 开关），
+  需先修好再动总线。原始备注：`Control.stall_*` 恒 0，多周期从机的冻结点
   ID/EX 级，避免只冻结取指导致指令流错位。
 - **分支机构**：分支在 EX 解析（2 气泡），可前移到 ID；无分支预测。
 
-**② 异常 / 中断 / CSR（已完成）**
-
-- **CSR 文件** `rtl/Core/CSR/CSR.sv`：mstatus / misa / mie / mtvec / mscratch /
-  mepc / mcause / mtval（只读 0）/ mip（只读 MTIP）。读在 EX 级组合进行、写经
-  EX2MEM 到 **MEM 级提交**（保证陷阱精确：被冲刷的 CSR 指令不产生写），并带
-  同拍写前递（连续两条 CSR 指令操作同一寄存器时后一条看到前一条的结果）。
-- **Zicsr 六条**（CSRRW/S/C + 立即数形式，共 6 条）+ **MRET**；`rs1=0` / `uimm=0`
-  时不写 CSR 的规则、非法地址与写只读 CSR → 非法指令。
-- **陷阱入口**：非法指令(2)、EBREAK(3)、非对齐 load(4)/store(6)、ECALL(11)、
-  定时器中断(0x8000_0007)。异常在 EX 级冲刷 EX2MEM（出错指令不写回），
-  **非对齐访存在 EX 级就被拦下并门控请求**（不会先写坏内存再报异常）。
-- **中断**：`mip.MTIP & mie.MTIE & mstatus.MIE`，只在「EX 级是真实指令
-  （`id_ex_valid`）且不是访存指令」时受理 —— 避免让已发出访存的指令部分执行。
-- 由此暴露并修复的**三个真实 bug**（都会破坏真机代码）：
-  1. 陷阱与「更老的 CSR 写」同拍时不能覆盖整个写（否则紧挨 `csrw mtvec` 的陷阱
-     会跳到旧向量 0）；现在先做 CSR 写，再由陷阱覆盖写同一寄存器的情形。
-  2. `mtvec` 缺同拍前递 —— 设置向量后的下一条指令陷入时会用旧向量。
-  3. **CSR 指令写 rd 的是 CSR 旧值，EX/MEM 前递路径必须前递它**（与 load 数据
-     同理），否则「CSR 指令 → 紧接着用其结果的指令」拿到的是 ALU 结果。
-- 系统级用例（`tb/prog/gen_cpu_test.py` 的陷阱段）另修了两处**测试程序**缺陷：
-  记录指针必须是「完整 RAM 地址」而非偏移量；中断处理程序要先关掉定时器中断
-  （重载值很小，只清溢出会立刻再中断，形成中断风暴）。
-
-**③ 外设增强**
-
-- UART：接收未做多数表决与起始位二次确认；发送侧状态位（`TX_BUSY`）在写后
-  2 拍才置起，软件需自行留出间隔。
-- SPI：单字节、单从机、无 FIFO/DMA；GPIO 宽度固定 8 位。
-
-**④ 板级**
-
-- `constrs/pins.csv` 与 `pins.xdc` 尚未按实际开发板填写；时序收敛与上板验证未做。
-- RIB 的 m2 / m3 预留（规划给 DMA / 调试）。
-- 资源：ROM 用 4×36K BRAM、RAM 用 16×36K BRAM，共 20 块；Zynq-7010 共 60 块。
-
----
-
-## 8. 许可证
-
-本项目采用 [MIT License](LICENSE) 开源。

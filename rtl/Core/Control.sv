@@ -36,6 +36,7 @@ module Control (
     input  wire              ex_load_misaligned,    // load 地址非对齐
     input  wire              ex_store_misaligned,   // store 地址非对齐
     input  wire              ex_csr_illegal,        // CSR 地址非法 / 写只读 CSR
+    input  wire              ex_stall,              // 流水线停顿中（等待态）
     input  wire              interrupt_req,         // mip.MTIP & mie.MTIE & mstatus.MIE
     input  wire [`DATA_BUS]  mtvec,                 // 陷阱向量
     input  wire              mret_en,               // MRET（返回 mepc）
@@ -71,12 +72,16 @@ module Control (
 
     logic redirect, exception, trap;
 
-    assign redirect  = ex_branch_taken | ex_jump_taken;
-    assign exception = ex_illegal | ex_ecall | ex_ebreak |
-                       ex_load_misaligned | ex_store_misaligned | ex_csr_illegal;
+    // ★ 停顿中（总线等待态）EX 级指令被冻结，**本拍不提交**：
+    //   不允许重定向、不允许陷入、不允许受理中断 —— 等停顿结束后再执行。
+    //   否则「访存指令之后那条」如果在停顿期间重定向，取指流水会与气泡错位。
+    assign redirect  = (ex_branch_taken | ex_jump_taken) & ~ex_stall;
+    assign exception = (ex_illegal | ex_ecall | ex_ebreak |
+                        ex_load_misaligned | ex_store_misaligned | ex_csr_illegal)
+                       & ~ex_stall;
 
     // 中断只在没有同步异常时受理（同一指令上异常优先）
-    assign trap      = exception | (interrupt_req & ~exception);
+    assign trap      = exception | (interrupt_req & ~exception & ~ex_stall);
 
     //---- 陷阱 cause（mcause）----
     always_comb begin

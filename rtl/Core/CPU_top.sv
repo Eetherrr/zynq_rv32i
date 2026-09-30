@@ -122,7 +122,6 @@ module CPU_top (
     wire [31:0] mtvec, mepc_csr, mcause_csr, mstatus_csr, mie_csr;
     wire [15:0] _unused_csr_dbg;
 
-    assign mret_en = id_ex_mret & id_ex_valid;
 
     // 取指侧与 ROM 1 拍读延迟的配合（重要）
     //
@@ -163,17 +162,44 @@ module CPU_top (
     end
     wire flush_bubble = redirect_d1;
 
-    // 取指地址配对：见上面说明，必须用延后一拍的 PC
-    logic [`DATA_BUS] if_pc_d1;
+    // ---- 取指地址寄存（可停顿）与配对 ----
+    //
+    //  取指在这颗核里是**两级**的：PC →（ROM 内部地址寄存）→ ROM 输出 → IF2ID。
+    //  任何时刻都有「一条指令在途」：地址已送进 ROM、数据还没锁进 IF2ID。
+    //  若停顿期间只冻结 PC，ROM 会被同一个（冻结的）PC 反复寻址，在途那条
+    //  指令就再也取不回来 —— 停顿结束后指令流会**跳过一条指令**。
+    //
+    //  正确做法：停顿期间把送给 ROM 的地址冻结在**上一拍的值**（= 在途指令的
+    //  地址），ROM 因而持续输出同一条指令；PC / IF2ID / 下游一并冻结；
+    //  停顿结束后这条指令正好被 IF2ID 锁存 —— 不丢不重。
+    //
+    //  无停顿时 if_addr_q == if_pc，配对 = if_addr_q 延迟一拍，与原来的
+    //  if_pc_d1 完全等价 → 平时行为零变化。
+    wire  fetch_hold = stall_pc | hold_flag_i;      // 流水线停顿（未来接 AHB HREADY）
+    logic [`DATA_BUS] if_addr_q;                    // 送给 ROM 的地址
+    logic [`DATA_BUS] if_addr_hold;                 // 上一拍的 if_addr_q
+    logic [`DATA_BUS] if_addr_d1;                   // 配对地址（if_addr_q 延迟一拍）
+
+    assign if_addr_q = fetch_hold ? if_addr_hold : if_pc;
+
     always_ff @(posedge clk_sys or negedge rst_sys) begin
-        if (rst_sys == `RESET_EN) if_pc_d1 <= `PC_RESET;
-        else                      if_pc_d1 <= if_pc;
+        if (rst_sys == `RESET_EN) begin
+            if_addr_hold <= `PC_RESET;
+            if_addr_d1   <= `PC_RESET;
+        end
+        else begin
+            if_addr_hold <= if_addr_q;
+            if_addr_d1   <= if_addr_q;
+        end
     end
 
     // PC 停顿：数据访问抢占总线的当拍冻结 PC（下一拍重发同一地址）；
     // load-use / RAW 都不需要停顿（全前递，见 Control.sv）
     wire if_stall = stall_pc | hold_flag_i | if_bus_stall;
-    wire id_stall = stall_if2id;
+    wire id_stall = stall_if2id | fetch_hold;
+
+    // MRET 同样不能在停顿中提交（fetch_hold 声明见上）
+    assign mret_en = id_ex_mret & id_ex_valid & ~fetch_hold;
 
     // ---- 复位释放后的第一个取指槽 ----
     //   复位期间 PC 一直停在复位向量上，ROM 会反复寄存该地址，于是复位
@@ -204,7 +230,7 @@ module CPU_top (
     );
 
     IF u_IF (
-        .pc         (if_pc),
+        .pc         (if_addr_q),   // ★ 送 ROM 的是「可停顿的取指地址」
         .rom_data   (rom_instr_i),
         .rom_addr   (rom_instr_addr_o),
         .instr_addr (),
@@ -219,7 +245,7 @@ module CPU_top (
         // flush 时指令被清为 NOP，PC 仍锁存重定向目标，便于调试观察流水线
         .flush_pc     (redirect_en ? redirect_pc : if_pc),
         .instr_i      (if_instr_gated),
-        .instr_addr_i (if_pc_d1),
+        .instr_addr_i (if_addr_d1),
         .instr_o      (id_instr),
         .instr_addr_o (id_pc)
     );
@@ -286,7 +312,7 @@ module CPU_top (
         .clk_sys         (clk_sys),
         .rst_sys         (rst_sys),
         .flush           (flush_id2ex),
-        .stall           (stall_id2ex),
+        .stall           (stall_id2ex | fetch_hold),
         .id_pc           (id_pc),
         .id_rs1_addr     (id_rs1_addr),
         .id_rs2_addr     (id_rs2_addr),
@@ -429,7 +455,8 @@ module CPU_top (
         .clk_sys         (clk_sys),
         .rst_sys         (rst_sys),
         .flush           (flush_ex2mem),
-        .stall           (1'b0),
+        // 等待态期间保持：访存地址/写数据必须稳定（未来 AHB 的 HTRANS/HWDATA 保持）
+        .stall           (fetch_hold),
 
         .ex_alu_result   (ex_alu_result),
         .ex_rs2_data     (ex_rs2_data),
@@ -483,13 +510,43 @@ module CPU_top (
     //   （ex_mem_load_data），load-use 因此不需要停顿。
     //==================================================================
 
+    //------------------------------------------------------------------
+    // MEM 级读数据锁存
+    //   读数据只在「本次传输完成那一拍」有效。等待态会把整条流水线冻住，
+    //   而总线的地址仍来自 EX 级（下一条指令），于是总线上很快就不再是
+    //   本次 load 的数据；若停顿结束后仍直接取 ram_data_i，写回的就是错数据。
+    //   做法：只在 MEM 级确实是 load 的那一拍锁存读数据，停顿时改用锁存值。
+    //   无停顿时 mem_rdata_use == ram_data_i，行为与原来完全一致。
+    //------------------------------------------------------------------
+    logic [`DATA_BUS] mem_rdata_q;
+    logic             fetch_hold_d1;      // 上一拍是否处于停顿
+
+    always_ff @(posedge clk_sys or negedge rst_sys) begin
+        if (rst_sys == `RESET_EN) begin
+            mem_rdata_q   <= 32'b0;
+            fetch_hold_d1 <= 1'b0;
+        end
+        else begin
+            fetch_hold_d1 <= fetch_hold;
+            // 数据有效窗口 = 「MEM 级是 load 且不是停顿的延续」：
+            //   停顿第一拍的数据仍然有效（地址是上一拍由 EX 发出的），必须抓这一拍；
+            //   从第二拍起总线已被冻结的 EX 级改写，不再有效。
+            if (mem_read_from_ex && !fetch_hold_d1)
+                mem_rdata_q <= ram_data_i;
+        end
+    end
+
+    // 停顿第二拍起改用锁存值（第一拍继续用总线上仍然有效的数据）
+    wire [`DATA_BUS] mem_rdata_use =
+        (fetch_hold & fetch_hold_d1) ? mem_rdata_q : ram_data_i;
+
     // ---- MEM 级：读数据提取 / 扩展 / 对齐检查 ----
     MEM_load u_MEM_load (
         .mem_alu_result (mem_alu_result),
         .mem_size       (mem_size_from_ex),
         .mem_read       (mem_read_from_ex),
         .mem_unsigned   (mem_unsigned_from_ex),
-        .mem_rdata      (ram_data_i),        // 1 拍前给出的地址的数据
+        .mem_rdata      (mem_rdata_use),     // 1 拍前给出的地址的数据（停顿时用锁存值）
         .mem_rdata_ext  (mem_rdata_ext_c)
     );
 
@@ -586,7 +643,7 @@ module CPU_top (
         .clk_sys        (clk_sys),
         .rst_sys        (rst_sys),
         .flush          (flush_mem2wb),
-        .stall          (1'b0),
+        .stall          (fetch_hold),
 
         .mem_alu_result (mem_alu_result),
         .mem_rdata      (mem_rdata_ext_c),   // 提取+扩展结果，与写回控制同拍
@@ -629,6 +686,7 @@ module CPU_top (
         .rst_sys          (rst_sys),
 
         .ex_pc            (id_ex_pc),
+        .ex_stall         (fetch_hold),      // 等待态：本拍 EX 级指令不提交
         .ex_branch_taken  (ex_branch_taken),
         .ex_jump_taken    (ex_jump_taken),
         .ex_branch_target (ex_branch_target),
